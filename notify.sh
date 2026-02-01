@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Claude Code hook handler — tracks working/finished state in tmux
+# Claude Code hook handler — tracks working/finished/waiting state in tmux
 # Reads hook JSON from stdin, manages files in ~/.local/share/claude-notifier/
 set -euo pipefail
 
@@ -17,6 +17,7 @@ import json, sys, shlex
 data = json.load(sys.stdin)
 print('EVENT=' + shlex.quote(data.get('hook_event_name', '')))
 print('MSG=' + shlex.quote(data.get('message', '')))
+print('TOOL_NAME=' + shlex.quote(data.get('tool_name', '')))
 " 2>/dev/null)" || exit 0
 
 # Get tmux context — if not in tmux, exit silently
@@ -24,9 +25,12 @@ if [ -z "${TMUX:-}" ]; then
     exit 0
 fi
 
-SESSION="$(tmux display-message -p '#{session_name}' 2>/dev/null)" || exit 0
-WINDOW="$(tmux display-message -p '#{window_index}' 2>/dev/null)" || exit 0
-WINDOW_NAME="$(tmux display-message -p '#{window_name}' 2>/dev/null)" || exit 0
+# Use TMUX_PANE to identify Claude's pane, so we always resolve the correct
+# session/window even when the user is viewing a different window.
+PANE_TARGET="${TMUX_PANE:-%0}"
+SESSION="$(tmux display-message -t "$PANE_TARGET" -p '#{session_name}' 2>/dev/null)" || exit 0
+WINDOW="$(tmux display-message -t "$PANE_TARGET" -p '#{window_index}' 2>/dev/null)" || exit 0
+WINDOW_NAME="$(tmux display-message -t "$PANE_TARGET" -p '#{window_name}' 2>/dev/null)" || exit 0
 
 [ -z "$SESSION" ] && exit 0
 [ -z "$WINDOW" ] && exit 0
@@ -55,6 +59,17 @@ with open(sys.argv[7], 'w') as f:
 " "$SESSION" "$WINDOW" "$WINDOW_NAME" "$message" "$type" "$NOW" "${dir}/${KEY}"
 }
 
+read_type() {
+    local file="$1"
+    [ -f "$file" ] || return 1
+    while IFS= read -r line; do
+        case "$line" in
+            TYPE=*) printf '%s' "${line#TYPE=}"; return 0 ;;
+        esac
+    done < "$file"
+    return 1
+}
+
 case "$EVENT" in
     UserPromptSubmit)
         # Claude is working — mark active, clear any existing notification
@@ -62,10 +77,17 @@ case "$EVENT" in
         rm -f "${NOTIF_DIR}/${KEY}"
         ;;
     Stop)
-        # Claude finished — remove active, create notification, ring bell
+        # Claude finished — remove active marker
         rm -f "${ACTIVE_DIR}/${KEY}"
-        write_file "$NOTIF_DIR" "finished" "Finished"
-        printf '\a'
+        # Don't overwrite a waiting notification (permission request / notification)
+        EXISTING_TYPE="$(read_type "${NOTIF_DIR}/${KEY}" 2>/dev/null)" || EXISTING_TYPE=""
+        if [ "$EXISTING_TYPE" = "waiting" ]; then
+            # Keep the existing waiting notification, just ring bell
+            printf '\a'
+        else
+            write_file "$NOTIF_DIR" "finished" "Finished"
+            printf '\a'
+        fi
         ;;
     Notification)
         [ -z "$MSG" ] && MSG="Notification"
@@ -73,7 +95,16 @@ case "$EVENT" in
         if [ "${#MSG}" -gt 40 ]; then
             MSG="${MSG:0:37}..."
         fi
-        write_file "$NOTIF_DIR" "notification" "$MSG"
+        write_file "$NOTIF_DIR" "waiting" "$MSG"
+        printf '\a'
+        ;;
+    PermissionRequest)
+        # Permission needed — record as waiting with tool name
+        local_msg="Waiting"
+        if [ -n "$TOOL_NAME" ]; then
+            local_msg="Waiting: ${TOOL_NAME}"
+        fi
+        write_file "$NOTIF_DIR" "waiting" "$local_msg"
         printf '\a'
         ;;
 esac

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Claude Code Notifier — popup dashboard
-# Shows working/finished Claude sessions, allows direct window switching
+# Shows working/waiting/finished Claude sessions, allows direct window switching
 set -euo pipefail
 
 DATA_DIR="${HOME}/.local/share/claude-notifier"
@@ -71,7 +71,7 @@ load_entries() {
         fi
     done
 
-    # Read notification entries
+    # Read notification entries — split into waiting and finished
     for f in "$NOTIF_DIR"/*; do
         [ -f "$f" ] || continue
         if parse_file "$f" "P"; then
@@ -81,7 +81,10 @@ load_entries() {
             E_WNAME[$INDEX]="$P_WINDOW_NAME"
             E_MSG[$INDEX]="$P_MESSAGE"
             E_TS[$INDEX]="$P_TIMESTAMP"
-            E_CAT[$INDEX]="notification"
+            case "$P_TYPE" in
+                waiting) E_CAT[$INDEX]="waiting" ;;
+                *)       E_CAT[$INDEX]="finished" ;;
+            esac
         fi
     done
 }
@@ -113,13 +116,28 @@ render() {
         fi
     done
 
-    # Needs attention section
-    local has_notif=0
+    # Waiting section
+    local has_waiting=0
     for i in $(seq 1 "$INDEX"); do
-        if [ "${E_CAT[$i]}" = "notification" ]; then
-            if [ "$has_notif" -eq 0 ]; then
-                printf '\n  \033[1mNEEDS ATTENTION\033[0m\n'
-                has_notif=1
+        if [ "${E_CAT[$i]}" = "waiting" ]; then
+            if [ "$has_waiting" -eq 0 ]; then
+                printf '\n  \033[1mWAITING\033[0m\n'
+                has_waiting=1
+            fi
+            local rel
+            rel="$(relative_time "${E_TS[$i]}")"
+            printf '  \033[35m%-3s\033[0m ⏳  %-10s %-12s %-18s %s\n' \
+                "$i" "${E_SESSION[$i]}:${E_WINDOW[$i]}" "${E_WNAME[$i]}" "${E_MSG[$i]}" "$rel"
+        fi
+    done
+
+    # Finished section
+    local has_finished=0
+    for i in $(seq 1 "$INDEX"); do
+        if [ "${E_CAT[$i]}" = "finished" ]; then
+            if [ "$has_finished" -eq 0 ]; then
+                printf '\n  \033[1mFINISHED\033[0m\n'
+                has_finished=1
             fi
             local rel
             rel="$(relative_time "${E_TS[$i]}")"
@@ -136,8 +154,8 @@ goto_entry() {
     if [ "$num" -ge 1 ] 2>/dev/null && [ "$num" -le "$INDEX" ] 2>/dev/null; then
         local sess="${E_SESSION[$num]}"
         local win="${E_WINDOW[$num]}"
-        # Clear notification if it was one
-        if [ "${E_CAT[$num]}" = "notification" ]; then
+        # Clear notification if it was one (waiting or finished)
+        if [ "${E_CAT[$num]}" = "waiting" ] || [ "${E_CAT[$num]}" = "finished" ]; then
             local safe_sess
             safe_sess="$(printf '%s' "$sess" | tr '/ ' '__')"
             rm -f "${NOTIF_DIR}/${safe_sess}_${win}"

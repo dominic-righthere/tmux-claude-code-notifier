@@ -23,6 +23,7 @@ chmod +x "${SCRIPT_DIR}/notify.sh"
 chmod +x "${SCRIPT_DIR}/dashboard.sh"
 chmod +x "${SCRIPT_DIR}/status.sh"
 chmod +x "${SCRIPT_DIR}/clear.sh"
+chmod +x "${SCRIPT_DIR}/jump.sh"
 
 # 3. Merge hooks into ~/.claude/settings.json
 printf '  Configuring Claude Code hooks...\n'
@@ -47,7 +48,7 @@ hook_entry = lambda: [{'matcher': '', 'hooks': [{'type': 'command', 'command': n
 if 'hooks' not in settings:
     settings['hooks'] = {}
 
-for event in ['UserPromptSubmit', 'Stop', 'Notification']:
+for event in ['UserPromptSubmit', 'Stop', 'Notification', 'PermissionRequest']:
     settings['hooks'][event] = hook_entry()
 
 with open(settings_path, 'w') as f:
@@ -55,7 +56,7 @@ with open(settings_path, 'w') as f:
     f.write('\n')
 " "$SETTINGS_FILE" "${SCRIPT_DIR}/notify.sh"
 
-printf '  Hooks configured for: UserPromptSubmit, Stop, Notification\n'
+printf '  Hooks configured for: UserPromptSubmit, Stop, Notification, PermissionRequest\n'
 
 # 4. Add tmux configuration
 printf '  Configuring tmux...\n'
@@ -83,6 +84,7 @@ NOTIFIER_BLOCK="${MARKER_BEGIN}
 set-hook -g after-select-window 'run-shell \"${SCRIPT_DIR}/clear.sh #{session_name} #{window_index}\"'
 set -g @rose_pine_status_right_append_section '#(${SCRIPT_DIR}/status.sh)'
 bind-key N display-popup -E -w 80% -h 60% '${SCRIPT_DIR}/dashboard.sh'
+bind-key J run-shell '${SCRIPT_DIR}/jump.sh'
 ${MARKER_END}"
 
 # Insert before the TPM init line if it exists, otherwise append
@@ -109,4 +111,5 @@ printf '\n  Installation complete!\n\n'
 printf '  Next steps:\n'
 printf '    1. tmux source ~/.tmux.conf\n'
 printf '    2. Restart Claude Code (hooks load at startup)\n'
-printf '    3. prefix + N to open the notification dashboard\n\n'
+printf '    3. prefix + N to open the notification dashboard\n'
+printf '    4. prefix + J to jump to the most recent notification\n\n'

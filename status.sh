@@ -1,15 +1,99 @@
 #!/usr/bin/env bash
 # Claude Code Notifier — status bar widget
-# Outputs "● N" if there are notifications, empty string otherwise
-NOTIF_DIR="${HOME}/.local/share/claude-notifier/notifications"
+# Outputs per-type badges and toggles a second status line with details
+DATA_DIR="${HOME}/.local/share/claude-notifier"
+ACTIVE_DIR="${DATA_DIR}/active"
+NOTIF_DIR="${DATA_DIR}/notifications"
 
-[ -d "$NOTIF_DIR" ] || exit 0
+WORKING=0
+WAITING=0
+FINISHED=0
 
-COUNT=0
-for f in "$NOTIF_DIR"/*; do
-    [ -f "$f" ] && COUNT=$(( COUNT + 1 ))
-done
+# Count active (working) entries
+if [ -d "$ACTIVE_DIR" ]; then
+    for f in "$ACTIVE_DIR"/*; do
+        [ -f "$f" ] && WORKING=$(( WORKING + 1 ))
+    done
+fi
 
-if [ "$COUNT" -gt 0 ]; then
-    printf '● %d ' "$COUNT"
+# Count notification entries by type
+if [ -d "$NOTIF_DIR" ]; then
+    for f in "$NOTIF_DIR"/*; do
+        [ -f "$f" ] || continue
+        while IFS= read -r line; do
+            case "$line" in
+                TYPE=waiting) WAITING=$(( WAITING + 1 )); break ;;
+                TYPE=finished) FINISHED=$(( FINISHED + 1 )); break ;;
+                TYPE=*) FINISHED=$(( FINISHED + 1 )); break ;;
+            esac
+        done < "$f"
+    done
+fi
+
+TOTAL=$(( WORKING + WAITING + FINISHED ))
+
+# Build main badge output
+OUTPUT=""
+if [ "$WORKING" -gt 0 ]; then
+    OUTPUT="${OUTPUT}⟳${WORKING} "
+fi
+if [ "$WAITING" -gt 0 ]; then
+    OUTPUT="${OUTPUT}⏳${WAITING} "
+fi
+if [ "$FINISHED" -gt 0 ]; then
+    OUTPUT="${OUTPUT}●${FINISHED} "
+fi
+
+printf '%s' "$OUTPUT"
+
+# Toggle second status line
+if [ "$TOTAL" -gt 0 ]; then
+    # Build detail string for the second line
+    DETAILS=""
+
+    # Working entries
+    if [ -d "$ACTIVE_DIR" ]; then
+        for f in "$ACTIVE_DIR"/*; do
+            [ -f "$f" ] || continue
+            _sess="" _win="" _msg=""
+            while IFS= read -r line; do
+                case "$line" in
+                    SESSION=*) _sess="${line#SESSION=}" ;;
+                    WINDOW=*) _win="${line#WINDOW=}" ;;
+                    MESSAGE=*) _msg="${line#MESSAGE=}" ;;
+                esac
+            done < "$f"
+            [ -n "$_sess" ] && DETAILS="${DETAILS} ⟳ ${_sess}:${_win} ${_msg} |"
+        done
+    fi
+
+    # Notification entries (waiting + finished)
+    if [ -d "$NOTIF_DIR" ]; then
+        for f in "$NOTIF_DIR"/*; do
+            [ -f "$f" ] || continue
+            _sess="" _win="" _msg="" _type=""
+            while IFS= read -r line; do
+                case "$line" in
+                    SESSION=*) _sess="${line#SESSION=}" ;;
+                    WINDOW=*) _win="${line#WINDOW=}" ;;
+                    MESSAGE=*) _msg="${line#MESSAGE=}" ;;
+                    TYPE=*) _type="${line#TYPE=}" ;;
+                esac
+            done < "$f"
+            if [ -n "$_sess" ]; then
+                case "$_type" in
+                    waiting)  DETAILS="${DETAILS} ⏳ ${_sess}:${_win} ${_msg} |" ;;
+                    *)        DETAILS="${DETAILS} ● ${_sess}:${_win} ${_msg} |" ;;
+                esac
+            fi
+        done
+    fi
+
+    # Remove trailing " |"
+    DETAILS="${DETAILS% |}"
+
+    tmux set -g status 2 2>/dev/null
+    tmux set -g 'status-format[1]' "#[align=left]${DETAILS}" 2>/dev/null
+else
+    tmux set -g status on 2>/dev/null
 fi
