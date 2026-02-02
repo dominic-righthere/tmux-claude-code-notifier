@@ -92,11 +92,63 @@ load_entries() {
     done
 }
 
+icon_for() {
+    case "$1" in
+        working) printf '⟳' ;;
+        waiting) printf '⏳' ;;
+        finished) printf '●' ;;
+        idle)    printf '○' ;;
+    esac
+}
+
+color_for() {
+    case "$1" in
+        working)  printf '33' ;;
+        waiting)  printf '35' ;;
+        finished) printf '31' ;;
+        idle)     printf '90' ;;
+    esac
+}
+
+render_section() {
+    local cat="$1" label="$2" cols="$3"
+    local has=0
+    for i in $(seq 1 "$INDEX"); do
+        [ "${E_CAT[$i]}" = "$cat" ] || continue
+        if [ "$has" -eq 0 ]; then
+            printf '\n  \033[1m%s\033[0m\n' "$label"
+            has=1
+        fi
+        local rel icon clr sesswin wname
+        rel="$(relative_time "${E_TS[$i]}")"
+        icon="$(icon_for "$cat")"
+        clr="$(color_for "$cat")"
+        sesswin="${E_SESSION[$i]}:${E_WINDOW[$i]}"
+        wname="${E_WNAME[$i]}"
+        if [ "$cols" -lt 60 ]; then
+            # Compact: truncate wname to 8 chars
+            [ "${#wname}" -gt 8 ] && wname="${wname:0:8}"
+            printf '  \033[%sm%-2s\033[0m %s  %-8s %-8s %s\n' \
+                "$clr" "$i" "$icon" "$sesswin" "$wname" "$rel"
+        else
+            printf '  \033[%sm%-3s\033[0m %s  %-10s %-12s %-18s %s\n' \
+                "$clr" "$i" "$icon" "$sesswin" "$wname" "${E_MSG[$i]}" "$rel"
+        fi
+    done
+}
+
 render() {
+    local cols
+    cols=$(tput cols 2>/dev/null || echo 80)
     clear
     printf '\n'
-    printf '           Claude Code Notifications\n'
-    printf '  ────────────────────────────────────────────────────────\n'
+    if [ "$cols" -lt 60 ]; then
+        printf '  Claude Code Notifications\n'
+        printf '  ──────────────────────────\n'
+    else
+        printf '           Claude Code Notifications\n'
+        printf '  ────────────────────────────────────────────────────────\n'
+    fi
 
     if [ "$INDEX" -eq 0 ]; then
         printf '\n    No active sessions or notifications.\n\n'
@@ -104,65 +156,10 @@ render() {
         return
     fi
 
-    # Working section
-    local has_working=0
-    for i in $(seq 1 "$INDEX"); do
-        if [ "${E_CAT[$i]}" = "working" ]; then
-            if [ "$has_working" -eq 0 ]; then
-                printf '\n  \033[1mWORKING\033[0m\n'
-                has_working=1
-            fi
-            local rel
-            rel="$(relative_time "${E_TS[$i]}")"
-            printf '  \033[33m%-3s\033[0m ⟳  %-10s %-12s %-18s %s\n' \
-                "$i" "${E_SESSION[$i]}:${E_WINDOW[$i]}" "${E_WNAME[$i]}" "${E_MSG[$i]}" "$rel"
-        fi
-    done
-
-    # Waiting section
-    local has_waiting=0
-    for i in $(seq 1 "$INDEX"); do
-        if [ "${E_CAT[$i]}" = "waiting" ]; then
-            if [ "$has_waiting" -eq 0 ]; then
-                printf '\n  \033[1mWAITING\033[0m\n'
-                has_waiting=1
-            fi
-            local rel
-            rel="$(relative_time "${E_TS[$i]}")"
-            printf '  \033[35m%-3s\033[0m ⏳  %-10s %-12s %-18s %s\n' \
-                "$i" "${E_SESSION[$i]}:${E_WINDOW[$i]}" "${E_WNAME[$i]}" "${E_MSG[$i]}" "$rel"
-        fi
-    done
-
-    # Finished section
-    local has_finished=0
-    for i in $(seq 1 "$INDEX"); do
-        if [ "${E_CAT[$i]}" = "finished" ]; then
-            if [ "$has_finished" -eq 0 ]; then
-                printf '\n  \033[1mFINISHED\033[0m\n'
-                has_finished=1
-            fi
-            local rel
-            rel="$(relative_time "${E_TS[$i]}")"
-            printf '  \033[31m%-3s\033[0m ●  %-10s %-12s %-18s %s\n' \
-                "$i" "${E_SESSION[$i]}:${E_WINDOW[$i]}" "${E_WNAME[$i]}" "${E_MSG[$i]}" "$rel"
-        fi
-    done
-
-    # Idle section
-    local has_idle=0
-    for i in $(seq 1 "$INDEX"); do
-        if [ "${E_CAT[$i]}" = "idle" ]; then
-            if [ "$has_idle" -eq 0 ]; then
-                printf '\n  \033[1mIDLE\033[0m\n'
-                has_idle=1
-            fi
-            local rel
-            rel="$(relative_time "${E_TS[$i]}")"
-            printf '  \033[90m%-3s\033[0m ○  %-10s %-12s %-18s %s\n' \
-                "$i" "${E_SESSION[$i]}:${E_WINDOW[$i]}" "${E_WNAME[$i]}" "${E_MSG[$i]}" "$rel"
-        fi
-    done
+    render_section working  "WORKING"  "$cols"
+    render_section waiting  "WAITING"  "$cols"
+    render_section finished "FINISHED" "$cols"
+    render_section idle     "IDLE"     "$cols"
 
     printf '\n  [1-%d] goto  [c] clear all  [q] quit\n' "$INDEX"
 }

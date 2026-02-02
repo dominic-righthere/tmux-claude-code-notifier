@@ -76,8 +76,8 @@ if [ "$TOTAL" -gt 0 ]; then
             done < "$f"
             if [ -n "$_sess" ]; then
                 case "$_type" in
-                    idle) DETAILS="${DETAILS} ○ ${_sess}:${_win} ${_msg} |" ;;
-                    *)    DETAILS="${DETAILS} ⟳ ${_sess}:${_win} ${_msg} |" ;;
+                    idle) DETAILS="${DETAILS} ○ ${_sess}:${_win} |" ;;
+                    *)    DETAILS="${DETAILS} ⟳ ${_sess}:${_win} |" ;;
                 esac
             fi
         done
@@ -98,8 +98,16 @@ if [ "$TOTAL" -gt 0 ]; then
             done < "$f"
             if [ -n "$_sess" ]; then
                 case "$_type" in
-                    waiting)  DETAILS="${DETAILS} ⏳ ${_sess}:${_win} ${_msg} |" ;;
-                    *)        DETAILS="${DETAILS} ● ${_sess}:${_win} ${_msg} |" ;;
+                    waiting)
+                        _msg="${_msg#Waiting: }"
+                        _msg="${_msg#Waiting}"
+                        if [ -n "$_msg" ]; then
+                            DETAILS="${DETAILS} ⏳ ${_sess}:${_win} ${_msg} |"
+                        else
+                            DETAILS="${DETAILS} ⏳ ${_sess}:${_win} |"
+                        fi
+                        ;;
+                    *)        DETAILS="${DETAILS} ● ${_sess}:${_win} |" ;;
                 esac
             fi
         done
