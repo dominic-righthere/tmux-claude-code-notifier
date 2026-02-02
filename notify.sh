@@ -77,8 +77,8 @@ case "$EVENT" in
         rm -f "${NOTIF_DIR}/${KEY}"
         ;;
     Stop)
-        # Claude finished — remove active marker
-        rm -f "${ACTIVE_DIR}/${KEY}"
+        # Claude finished — mark as idle (keep in active dir for visibility)
+        write_file "$ACTIVE_DIR" "idle" "Idle"
         # Don't overwrite a waiting notification (permission request / notification)
         EXISTING_TYPE="$(read_type "${NOTIF_DIR}/${KEY}" 2>/dev/null)" || EXISTING_TYPE=""
         if [ "$EXISTING_TYPE" = "waiting" ]; then

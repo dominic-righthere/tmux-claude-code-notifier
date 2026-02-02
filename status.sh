@@ -6,13 +6,20 @@ ACTIVE_DIR="${DATA_DIR}/active"
 NOTIF_DIR="${DATA_DIR}/notifications"
 
 WORKING=0
+IDLE=0
 WAITING=0
 FINISHED=0
 
-# Count active (working) entries
+# Count active entries by type (working vs idle)
 if [ -d "$ACTIVE_DIR" ]; then
     for f in "$ACTIVE_DIR"/*; do
-        [ -f "$f" ] && WORKING=$(( WORKING + 1 ))
+        [ -f "$f" ] || continue
+        while IFS= read -r line; do
+            case "$line" in
+                TYPE=idle) IDLE=$(( IDLE + 1 )); break ;;
+                TYPE=*) WORKING=$(( WORKING + 1 )); break ;;
+            esac
+        done < "$f"
     done
 fi
 
@@ -30,7 +37,7 @@ if [ -d "$NOTIF_DIR" ]; then
     done
 fi
 
-TOTAL=$(( WORKING + WAITING + FINISHED ))
+TOTAL=$(( WORKING + IDLE + WAITING + FINISHED ))
 
 # Build main badge output
 OUTPUT=""
@@ -43,6 +50,9 @@ fi
 if [ "$FINISHED" -gt 0 ]; then
     OUTPUT="${OUTPUT}●${FINISHED} "
 fi
+if [ "$IDLE" -gt 0 ]; then
+    OUTPUT="${OUTPUT}○${IDLE} "
+fi
 
 printf '%s' "$OUTPUT"
 
@@ -51,19 +61,25 @@ if [ "$TOTAL" -gt 0 ]; then
     # Build detail string for the second line
     DETAILS=""
 
-    # Working entries
+    # Active entries (working + idle)
     if [ -d "$ACTIVE_DIR" ]; then
         for f in "$ACTIVE_DIR"/*; do
             [ -f "$f" ] || continue
-            _sess="" _win="" _msg=""
+            _sess="" _win="" _msg="" _type=""
             while IFS= read -r line; do
                 case "$line" in
                     SESSION=*) _sess="${line#SESSION=}" ;;
                     WINDOW=*) _win="${line#WINDOW=}" ;;
                     MESSAGE=*) _msg="${line#MESSAGE=}" ;;
+                    TYPE=*) _type="${line#TYPE=}" ;;
                 esac
             done < "$f"
-            [ -n "$_sess" ] && DETAILS="${DETAILS} ⟳ ${_sess}:${_win} ${_msg} |"
+            if [ -n "$_sess" ]; then
+                case "$_type" in
+                    idle) DETAILS="${DETAILS} ○ ${_sess}:${_win} ${_msg} |" ;;
+                    *)    DETAILS="${DETAILS} ⟳ ${_sess}:${_win} ${_msg} |" ;;
+                esac
+            fi
         done
     fi
 

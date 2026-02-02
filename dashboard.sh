@@ -57,7 +57,7 @@ load_entries() {
     E_SESSION=() E_WINDOW=() E_WNAME=() E_MSG=() E_TS=() E_CAT=()
     INDEX=0
 
-    # Read active (working) entries
+    # Read active entries (working + idle)
     for f in "$ACTIVE_DIR"/*; do
         [ -f "$f" ] || continue
         if parse_file "$f" "P"; then
@@ -67,7 +67,10 @@ load_entries() {
             E_WNAME[$INDEX]="$P_WINDOW_NAME"
             E_MSG[$INDEX]="$P_MESSAGE"
             E_TS[$INDEX]="$P_TIMESTAMP"
-            E_CAT[$INDEX]="working"
+            case "$P_TYPE" in
+                idle) E_CAT[$INDEX]="idle" ;;
+                *)    E_CAT[$INDEX]="working" ;;
+            esac
         fi
     done
 
@@ -142,6 +145,21 @@ render() {
             local rel
             rel="$(relative_time "${E_TS[$i]}")"
             printf '  \033[31m%-3s\033[0m ●  %-10s %-12s %-18s %s\n' \
+                "$i" "${E_SESSION[$i]}:${E_WINDOW[$i]}" "${E_WNAME[$i]}" "${E_MSG[$i]}" "$rel"
+        fi
+    done
+
+    # Idle section
+    local has_idle=0
+    for i in $(seq 1 "$INDEX"); do
+        if [ "${E_CAT[$i]}" = "idle" ]; then
+            if [ "$has_idle" -eq 0 ]; then
+                printf '\n  \033[1mIDLE\033[0m\n'
+                has_idle=1
+            fi
+            local rel
+            rel="$(relative_time "${E_TS[$i]}")"
+            printf '  \033[90m%-3s\033[0m ○  %-10s %-12s %-18s %s\n' \
                 "$i" "${E_SESSION[$i]}:${E_WINDOW[$i]}" "${E_WNAME[$i]}" "${E_MSG[$i]}" "$rel"
         fi
     done
