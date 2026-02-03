@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Claude Code Notifier — popup dashboard
 # Shows working/waiting/finished Claude sessions, allows direct window switching
-set -euo pipefail
+set -uo pipefail
 
 DATA_DIR="${HOME}/.local/share/claude-notifier"
 ACTIVE_DIR="${DATA_DIR}/active"
@@ -14,13 +14,13 @@ relative_time() {
     local ts="$1"
     local diff=$(( NOW - ts ))
     if [ "$diff" -lt 60 ]; then
-        printf '%ds ago' "$diff"
+        printf '%ds' "$diff"
     elif [ "$diff" -lt 3600 ]; then
-        printf '%dm ago' "$(( diff / 60 ))"
+        printf '%dm' "$(( diff / 60 ))"
     elif [ "$diff" -lt 86400 ]; then
-        printf '%dh ago' "$(( diff / 3600 ))"
+        printf '%dh' "$(( diff / 3600 ))"
     else
-        printf '%dd ago' "$(( diff / 86400 ))"
+        printf '%dd' "$(( diff / 86400 ))"
     fi
 }
 
@@ -38,7 +38,7 @@ parse_file() {
             TYPE) _type="$val" ;;
             TIMESTAMP) _timestamp="$val" ;;
         esac
-    done < "$file"
+    done < "$file" || true
     [ -z "$_session" ] && return 1
     eval "${prefix}_SESSION=\$_session"
     eval "${prefix}_WINDOW=\$_window"
@@ -53,9 +53,48 @@ parse_file() {
 declare -a E_SESSION=() E_WINDOW=() E_WNAME=() E_MSG=() E_TS=() E_CAT=()
 INDEX=0
 
+# Column width tracking for alignment
+MAX_SESSWIN=0
+MAX_WNAME=0
+
+# Remove stale files (sessions/windows that no longer exist in tmux, or too old)
+cleanup_stale() {
+    for f in "$ACTIVE_DIR"/* "$NOTIF_DIR"/*; do
+        [ -f "$f" ] || continue
+        local sess="" win="" ts="" type=""
+        while IFS= read -r line; do
+            case "$line" in
+                SESSION=*) sess="${line#SESSION=}" ;;
+                WINDOW=*) win="${line#WINDOW=}" ;;
+                TIMESTAMP=*) ts="${line#TIMESTAMP=}" ;;
+                TYPE=*) type="${line#TYPE=}" ;;
+            esac
+        done < "$f" || true
+        # If session doesn't exist, remove file
+        if [ -n "$sess" ] && ! tmux has-session -t "$sess" 2>/dev/null; then
+            rm -f "$f"
+        # If window doesn't exist in session, remove file
+        elif [ -n "$sess" ] && [ -n "$win" ] && ! tmux list-windows -t "$sess" -F '#{window_index}' 2>/dev/null | grep -qx "$win"; then
+            rm -f "$f"
+        # Remove stale entries based on age: working > 1h, idle > 12h
+        elif [ -n "$ts" ]; then
+            local age=$(( NOW - ts ))
+            if [ "$type" = "working" ] && [ "$age" -gt 3600 ]; then
+                rm -f "$f"
+            elif [ "$type" = "idle" ] && [ "$age" -gt 43200 ]; then
+                rm -f "$f"
+            fi
+        fi
+    done
+}
+
 load_entries() {
+    # Prune stale sessions before loading
+    cleanup_stale
     E_SESSION=() E_WINDOW=() E_WNAME=() E_MSG=() E_TS=() E_CAT=()
     INDEX=0
+    MAX_SESSWIN=0
+    MAX_WNAME=0
 
     # Read active entries (working + idle)
     for f in "$ACTIVE_DIR"/*; do
@@ -90,6 +129,17 @@ load_entries() {
             esac
         fi
     done
+
+    # Calculate max column widths
+    for i in $(seq 1 "$INDEX"); do
+        local sw="${E_SESSION[$i]}:${E_WINDOW[$i]}"
+        [ "${#sw}" -gt "$MAX_SESSWIN" ] && MAX_SESSWIN="${#sw}"
+        [ "${#E_WNAME[$i]}" -gt "$MAX_WNAME" ] && MAX_WNAME="${#E_WNAME[$i]}"
+    done
+
+    # Set minimum widths
+    [ "$MAX_SESSWIN" -lt 6 ] && MAX_SESSWIN=6
+    [ "$MAX_WNAME" -lt 4 ] && MAX_WNAME=4
 }
 
 icon_for() {
@@ -110,6 +160,63 @@ color_for() {
     esac
 }
 
+render_entry_wide() {
+    local i="$1" cat="$2"
+    local clr icon sesswin wname msg rel
+    clr="$(color_for "$cat")"
+    icon="$(icon_for "$cat")"
+    sesswin="${E_SESSION[$i]}:${E_WINDOW[$i]}"
+    wname="${E_WNAME[$i]}"
+    msg="${E_MSG[$i]}"
+    rel="$(relative_time "${E_TS[$i]}")"
+
+    # Truncate message if too long
+    [ "${#msg}" -gt 30 ] && msg="${msg:0:27}..."
+
+    # Cap wname at 16 chars for wide
+    [ "${#wname}" -gt 16 ] && wname="${wname:0:16}"
+    local wname_w=$MAX_WNAME
+    [ "$wname_w" -gt 16 ] && wname_w=16
+
+    printf '  \033[%sm%-2s\033[0m %s  %-*s  %-*s  %-30s  %s\n' \
+        "$clr" "$i" "$icon" "$MAX_SESSWIN" "$sesswin" "$wname_w" "$wname" "$msg" "$rel"
+}
+
+render_entry_medium() {
+    local i="$1" cat="$2"
+    local clr icon sesswin wname msg rel
+    clr="$(color_for "$cat")"
+    icon="$(icon_for "$cat")"
+    sesswin="${E_SESSION[$i]}:${E_WINDOW[$i]}"
+    wname="${E_WNAME[$i]}"
+    msg="${E_MSG[$i]}"
+    rel="$(relative_time "${E_TS[$i]}")"
+
+    # Truncate message for medium width
+    [ "${#msg}" -gt 18 ] && msg="${msg:0:15}..."
+
+    # Cap wname at 12 chars for medium
+    [ "${#wname}" -gt 12 ] && wname="${wname:0:12}"
+    local wname_w=$MAX_WNAME
+    [ "$wname_w" -gt 12 ] && wname_w=12
+
+    printf '  \033[%sm%-2s\033[0m %s  %-*s  %-*s  %-18s  %s\n' \
+        "$clr" "$i" "$icon" "$MAX_SESSWIN" "$sesswin" "$wname_w" "$wname" "$msg" "$rel"
+}
+
+render_entry_narrow() {
+    local i="$1" cat="$2"
+    local clr icon sesswin rel
+    clr="$(color_for "$cat")"
+    icon="$(icon_for "$cat")"
+    sesswin="${E_SESSION[$i]}:${E_WINDOW[$i]}"
+    rel="$(relative_time "${E_TS[$i]}")"
+
+    # Narrow: just index, icon, session:win, time
+    printf '  \033[%sm%s\033[0m %s %-*s %s\n' \
+        "$clr" "$i" "$icon" "$MAX_SESSWIN" "$sesswin" "$rel"
+}
+
 render_section() {
     local cat="$1" label="$2" cols="$3"
     local has=0
@@ -119,20 +226,12 @@ render_section() {
             printf '\n  \033[1m%s\033[0m\n' "$label"
             has=1
         fi
-        local rel icon clr sesswin wname
-        rel="$(relative_time "${E_TS[$i]}")"
-        icon="$(icon_for "$cat")"
-        clr="$(color_for "$cat")"
-        sesswin="${E_SESSION[$i]}:${E_WINDOW[$i]}"
-        wname="${E_WNAME[$i]}"
-        if [ "$cols" -lt 60 ]; then
-            # Compact: truncate wname to 8 chars
-            [ "${#wname}" -gt 8 ] && wname="${wname:0:8}"
-            printf '  \033[%sm%-2s\033[0m %s  %-8s %-8s %s\n' \
-                "$clr" "$i" "$icon" "$sesswin" "$wname" "$rel"
+        if [ "$cols" -ge 100 ]; then
+            render_entry_wide "$i" "$cat"
+        elif [ "$cols" -ge 60 ]; then
+            render_entry_medium "$i" "$cat"
         else
-            printf '  \033[%sm%-3s\033[0m %s  %-10s %-12s %-18s %s\n' \
-                "$clr" "$i" "$icon" "$sesswin" "$wname" "${E_MSG[$i]}" "$rel"
+            render_entry_narrow "$i" "$cat"
         fi
     done
 }
@@ -142,16 +241,21 @@ render() {
     cols=$(tput cols 2>/dev/null || echo 80)
     clear
     printf '\n'
-    if [ "$cols" -lt 60 ]; then
-        printf '  Claude Code Notifications\n'
-        printf '  ──────────────────────────\n'
+
+    # Header scales with width
+    if [ "$cols" -ge 100 ]; then
+        printf '              Claude Code Sessions\n'
+        printf '  ────────────────────────────────────────────────────────────────────\n'
+    elif [ "$cols" -ge 60 ]; then
+        printf '        Claude Code Sessions\n'
+        printf '  ──────────────────────────────────────────────\n'
     else
-        printf '           Claude Code Notifications\n'
-        printf '  ────────────────────────────────────────────────────────\n'
+        printf '  Claude Sessions\n'
+        printf '  ───────────────\n'
     fi
 
     if [ "$INDEX" -eq 0 ]; then
-        printf '\n    No active sessions or notifications.\n\n'
+        printf '\n    No active sessions.\n\n'
         printf '  [q] quit\n'
         return
     fi
@@ -188,12 +292,20 @@ render
 # Input buffer for multi-digit numbers
 NUMBUF=""
 
+# Ensure we're reading from the terminal (fixes tmux popup issues)
+if [ -t 0 ]; then
+    : # stdin is already a tty
+else
+    exec </dev/tty 2>/dev/null || exec 0<&1 2>/dev/null || true
+fi
+
 while true; do
     if [ -n "$NUMBUF" ]; then
         # Wait briefly for more digits, then process
-        read -rsn1 -t 0.5 key || key=""
+        read -rsn1 -t 0.5 key 2>/dev/null || key=""
     else
-        read -rsn1 key
+        # Always use a timeout to prevent blocking issues
+        read -rsn1 -t 1 key 2>/dev/null || key=""
     fi
 
     case "$key" in

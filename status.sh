@@ -56,34 +56,11 @@ fi
 
 printf '%s' "$OUTPUT"
 
-# Toggle second status line
-if [ "$TOTAL" -gt 0 ]; then
-    # Build detail string for the second line
-    DETAILS=""
+# Toggle second status line — only show if there are actionable notifications
+if [ "$WAITING" -gt 0 ] || [ "$FINISHED" -gt 0 ]; then
+    # Collect ALL notification details inline
+    DETAIL=""
 
-    # Active entries (working + idle)
-    if [ -d "$ACTIVE_DIR" ]; then
-        for f in "$ACTIVE_DIR"/*; do
-            [ -f "$f" ] || continue
-            _sess="" _win="" _msg="" _type=""
-            while IFS= read -r line; do
-                case "$line" in
-                    SESSION=*) _sess="${line#SESSION=}" ;;
-                    WINDOW=*) _win="${line#WINDOW=}" ;;
-                    MESSAGE=*) _msg="${line#MESSAGE=}" ;;
-                    TYPE=*) _type="${line#TYPE=}" ;;
-                esac
-            done < "$f"
-            if [ -n "$_sess" ]; then
-                case "$_type" in
-                    idle) DETAILS="${DETAILS} ○ ${_sess}:${_win} |" ;;
-                    *)    DETAILS="${DETAILS} ⟳ ${_sess}:${_win} |" ;;
-                esac
-            fi
-        done
-    fi
-
-    # Notification entries (waiting + finished)
     if [ -d "$NOTIF_DIR" ]; then
         for f in "$NOTIF_DIR"/*; do
             [ -f "$f" ] || continue
@@ -96,28 +73,36 @@ if [ "$TOTAL" -gt 0 ]; then
                     TYPE=*) _type="${line#TYPE=}" ;;
                 esac
             done < "$f"
-            if [ -n "$_sess" ]; then
-                case "$_type" in
-                    waiting)
-                        _msg="${_msg#Waiting: }"
-                        _msg="${_msg#Waiting}"
-                        if [ -n "$_msg" ]; then
-                            DETAILS="${DETAILS} ⏳ ${_sess}:${_win} ${_msg} |"
-                        else
-                            DETAILS="${DETAILS} ⏳ ${_sess}:${_win} |"
-                        fi
-                        ;;
-                    *)        DETAILS="${DETAILS} ● ${_sess}:${_win} |" ;;
-                esac
+
+            entry=""
+            if [ "$_type" = "waiting" ] && [ -n "$_sess" ]; then
+                _msg="${_msg#Waiting: }"
+                _msg="${_msg#Waiting}"
+                if [ -n "$_msg" ]; then
+                    entry="⏳ ${_sess}:${_win} — Waiting: ${_msg}"
+                else
+                    entry="⏳ ${_sess}:${_win} — Waiting for input"
+                fi
+            elif [ "$_type" = "finished" ] && [ -n "$_sess" ]; then
+                entry="● ${_sess}:${_win} — Task complete"
+            fi
+
+            if [ -n "$entry" ]; then
+                if [ -n "$DETAIL" ]; then
+                    DETAIL="${DETAIL} | ${entry}"
+                else
+                    DETAIL=" ${entry}"
+                fi
             fi
         done
     fi
 
-    # Remove trailing " |"
-    DETAILS="${DETAILS% |}"
-
-    tmux set -g status 2 2>/dev/null
-    tmux set -g 'status-format[1]' "#[align=left]${DETAILS}" 2>/dev/null
+    if [ -n "$DETAIL" ]; then
+        tmux set -g status 2 2>/dev/null
+        tmux set -g 'status-format[1]' "#[align=left]${OUTPUT}${DETAIL}" 2>/dev/null
+    else
+        tmux set -g status on 2>/dev/null
+    fi
 else
     tmux set -g status on 2>/dev/null
 fi
