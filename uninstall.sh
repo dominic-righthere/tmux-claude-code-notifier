@@ -31,10 +31,11 @@ fi
 # 2. Remove config block from ~/.tmux.conf
 if [ -f "$TMUX_CONF" ] && grep -q '# claude-notifier-begin' "$TMUX_CONF" 2>/dev/null; then
     printf '  Removing tmux config block...\n'
-    sed -i.bak '/# claude-notifier-begin/,/# claude-notifier-end/d' "$TMUX_CONF"
-    rm -f "${TMUX_CONF}.bak"
-    # Collapse consecutive blank lines left behind
-    cat -s "$TMUX_CONF" > "${TMUX_CONF}.tmp" && mv "${TMUX_CONF}.tmp" "$TMUX_CONF"
+    # Pipe through sed (not -i) to support symlinked tmux.conf
+    sed '/# claude-notifier-begin/,/# claude-notifier-end/d' "$TMUX_CONF" > "${TMUX_CONF}.tmp"
+    # Collapse consecutive blank lines, write back through symlink
+    cat -s "${TMUX_CONF}.tmp" > "$TMUX_CONF"
+    rm -f "${TMUX_CONF}.tmp"
 else
     printf '  No tmux config block found, skipping.\n'
 fi
