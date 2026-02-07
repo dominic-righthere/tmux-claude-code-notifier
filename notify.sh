@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Claude Code hook handler — tracks working/finished/waiting state in tmux
 # Reads hook JSON from stdin, manages files in ~/.local/share/claude-notifier/
-set -euo pipefail
+set -uo pipefail
 
 DATA_DIR="${HOME}/.local/share/claude-notifier"
 ACTIVE_DIR="${DATA_DIR}/active"
@@ -11,14 +11,25 @@ mkdir -p "$ACTIVE_DIR" "$NOTIF_DIR"
 # Read JSON from stdin
 INPUT="$(cat)"
 
-# Parse JSON fields with python3 (available on macOS, handles escapes correctly)
-eval "$(printf '%s' "$INPUT" | python3 -c "
-import json, sys, shlex
-data = json.load(sys.stdin)
-print('EVENT=' + shlex.quote(data.get('hook_event_name', '')))
-print('MSG=' + shlex.quote(data.get('message', '')))
-print('TOOL_NAME=' + shlex.quote(data.get('tool_name', '')))
-" 2>/dev/null)" || exit 0
+# Parse JSON fields with pure bash (avoids python3 spawn overhead ~50-80ms)
+# JSON format: {"hook_event_name":"X","message":"Y","tool_name":"Z"}
+extract_json_value() {
+    local json="$1" key="$2"
+    # Replace \" with placeholder, extract, then restore
+    local cleaned="${json//\\\"/@@Q@@}"
+    local pattern="\"${key}\":\"([^\"]*)\""
+    if [[ "$cleaned" =~ $pattern ]]; then
+        local val="${BASH_REMATCH[1]}"
+        printf '%s' "${val//@@Q@@/\"}"
+    fi
+}
+
+EVENT="$(extract_json_value "$INPUT" "hook_event_name")"
+MSG="$(extract_json_value "$INPUT" "message")"
+TOOL_NAME="$(extract_json_value "$INPUT" "tool_name")"
+
+# Exit if we couldn't parse the event
+[ -z "$EVENT" ] && exit 0
 
 # Get tmux context — if not in tmux, exit silently
 if [ -z "${TMUX:-}" ]; then
@@ -43,20 +54,10 @@ NOW="$(date +%s)"
 
 write_file() {
     local dir="$1" type="$2" message="$3"
-    python3 -c "
-import sys
-fields = {
-    'SESSION': sys.argv[1],
-    'WINDOW': sys.argv[2],
-    'WINDOW_NAME': sys.argv[3],
-    'MESSAGE': sys.argv[4],
-    'TYPE': sys.argv[5],
-    'TIMESTAMP': sys.argv[6],
-}
-with open(sys.argv[7], 'w') as f:
-    for k, v in fields.items():
-        f.write(f'{k}={v}\n')
-" "$SESSION" "$WINDOW" "$WINDOW_NAME" "$message" "$type" "$NOW" "${dir}/${KEY}"
+    # Pure bash file write (avoids python3 spawn overhead ~50-80ms)
+    printf 'SESSION=%s\nWINDOW=%s\nWINDOW_NAME=%s\nMESSAGE=%s\nTYPE=%s\nTIMESTAMP=%s\n' \
+        "$SESSION" "$WINDOW" "$WINDOW_NAME" "$message" "$type" "$NOW" \
+        > "${dir}/${KEY}"
 }
 
 read_type() {
@@ -108,5 +109,8 @@ case "$EVENT" in
         printf '\a'
         ;;
 esac
+
+# Force immediate tmux status bar refresh
+tmux refresh-client -S 2>/dev/null || true
 
 exit 0

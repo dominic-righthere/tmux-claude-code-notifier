@@ -49,13 +49,48 @@ parse_file() {
     return 0
 }
 
-# Arrays to hold entry data (indexed by entry number)
+# Arrays to hold entry data (indexed by internal entry number)
 declare -a E_SESSION=() E_WINDOW=() E_WNAME=() E_MSG=() E_TS=() E_CAT=()
-INDEX=0
+INDEX=0  # Total number of entries
+
+# Display order: maps visual position (1-based) to internal index
+declare -a DISPLAY_ORDER=()
+DISPLAY_COUNT=0  # Number of entries in display order
+CURSOR=1  # Currently selected visual position
 
 # Column width tracking for alignment
 MAX_SESSWIN=0
 MAX_WNAME=0
+
+# Key mapping: 1-9 for entries 1-9, a-z for entries 10-35
+KEYS="123456789abcdefghijklmnopqrstuvwxyz"
+
+pos_to_key() {
+    local pos="$1"
+    [ "$pos" -lt 1 ] || [ "$pos" -gt 35 ] && return 1
+    printf '%s' "${KEYS:$((pos-1)):1}"
+}
+
+key_to_pos() {
+    local key="$1"
+    local pos="${KEYS%%"$key"*}"
+    [ "$pos" = "$KEYS" ] && return 1  # not found
+    printf '%d' "$(( ${#pos} + 1 ))"
+}
+
+# Build display order array (visual order: working, waiting, finished, idle)
+build_display_order() {
+    DISPLAY_ORDER=()
+    DISPLAY_COUNT=0
+    local cat
+    for cat in working waiting finished idle; do
+        for i in $(seq 1 "$INDEX"); do
+            [ "${E_CAT[$i]}" = "$cat" ] || continue
+            DISPLAY_COUNT=$(( DISPLAY_COUNT + 1 ))
+            DISPLAY_ORDER[$DISPLAY_COUNT]=$i
+        done
+    done
+}
 
 # Remove stale files (sessions/windows that no longer exist in tmux, or too old)
 cleanup_stale() {
@@ -140,6 +175,9 @@ load_entries() {
     # Set minimum widths
     [ "$MAX_SESSWIN" -lt 6 ] && MAX_SESSWIN=6
     [ "$MAX_WNAME" -lt 4 ] && MAX_WNAME=4
+
+    # Build display order for navigation
+    build_display_order
 }
 
 icon_for() {
@@ -160,80 +198,75 @@ color_for() {
     esac
 }
 
-render_entry_wide() {
-    local i="$1" cat="$2"
-    local clr icon sesswin wname msg rel
+render_entry() {
+    local display_pos="$1" i="$2" cat="$3" cols="$4"
+    local clr icon sesswin wname msg rel status_txt key
+    local is_selected=0
+
+    [ "$display_pos" -eq "$CURSOR" ] && is_selected=1
+
     clr="$(color_for "$cat")"
     icon="$(icon_for "$cat")"
+    key="$(pos_to_key "$display_pos")"
     sesswin="${E_SESSION[$i]}:${E_WINDOW[$i]}"
     wname="${E_WNAME[$i]}"
     msg="${E_MSG[$i]}"
     rel="$(relative_time "${E_TS[$i]}")"
+    status_txt="$cat"
 
-    # Truncate message if too long
-    [ "${#msg}" -gt 30 ] && msg="${msg:0:27}..."
+    # Calculate available space
+    # base: 2 (left margin) + 2 (key) + 1 (space) + 2 (icon+space) + MAX_SESSWIN + 2 (gap) + 5 (time) + 2 (right margin)
+    local base_w=$(( 2 + 2 + 1 + 2 + MAX_SESSWIN + 2 + 5 + 2 ))
+    local remain=$(( cols - base_w ))
 
-    # Cap wname at 16 chars for wide
-    [ "${#wname}" -gt 16 ] && wname="${wname:0:16}"
-    local wname_w=$MAX_WNAME
-    [ "$wname_w" -gt 16 ] && wname_w=16
+    # Determine what columns to show and their widths
+    local show_status=0 show_wname=0 show_msg=0
+    local msg_w=0 wname_w=0
 
-    printf '  \033[%sm%-2s\033[0m %s  %-*s  %-*s  %-30s  %s\n' \
-        "$clr" "$i" "$icon" "$MAX_SESSWIN" "$sesswin" "$wname_w" "$wname" "$msg" "$rel"
+    if [ "$remain" -ge 12 ]; then
+        show_msg=1
+        msg_w=$remain
+    fi
+    if [ "$remain" -ge 24 ]; then
+        show_wname=1
+        wname_w=10
+        msg_w=$(( remain - 12 ))
+    fi
+    if [ "$remain" -ge 34 ]; then
+        show_status=1
+        msg_w=$(( remain - 22 ))
+    fi
+
+    # Truncate as needed
+    if [ "$show_wname" -eq 1 ] && [ "$wname_w" -gt 0 ] && [ "${#wname}" -gt "$wname_w" ]; then
+        wname="${wname:0:$((wname_w-1))}…"
+    fi
+    if [ "$show_msg" -eq 1 ] && [ "$msg_w" -gt 0 ] && [ "${#msg}" -gt "$msg_w" ]; then
+        msg="${msg:0:$((msg_w-1))}…"
+    fi
+
+    # Build output - highlight selected row
+    if [ "$is_selected" -eq 1 ]; then
+        printf '\033[7m'  # reverse video for selection
+    fi
+    printf '  \033[%sm%-2s\033[0m' "$clr" "$key"
+    [ "$is_selected" -eq 1 ] && printf '\033[7m'
+    printf ' %s  %-*s' "$icon" "$MAX_SESSWIN" "$sesswin"
+    [ "$show_status" -eq 1 ] && printf '  %-8s' "$status_txt"
+    [ "$show_wname" -eq 1 ] && printf '  %-*s' "$wname_w" "$wname"
+    [ "$show_msg" -eq 1 ] && printf '  %-*s' "$msg_w" "$msg"
+    printf '  %5s' "$rel"
+    [ "$is_selected" -eq 1 ] && printf '\033[0m'
+    printf '\n'
 }
 
-render_entry_medium() {
-    local i="$1" cat="$2"
-    local clr icon sesswin wname msg rel
-    clr="$(color_for "$cat")"
-    icon="$(icon_for "$cat")"
-    sesswin="${E_SESSION[$i]}:${E_WINDOW[$i]}"
-    wname="${E_WNAME[$i]}"
-    msg="${E_MSG[$i]}"
-    rel="$(relative_time "${E_TS[$i]}")"
-
-    # Truncate message for medium width
-    [ "${#msg}" -gt 18 ] && msg="${msg:0:15}..."
-
-    # Cap wname at 12 chars for medium
-    [ "${#wname}" -gt 12 ] && wname="${wname:0:12}"
-    local wname_w=$MAX_WNAME
-    [ "$wname_w" -gt 12 ] && wname_w=12
-
-    printf '  \033[%sm%-2s\033[0m %s  %-*s  %-*s  %-18s  %s\n' \
-        "$clr" "$i" "$icon" "$MAX_SESSWIN" "$sesswin" "$wname_w" "$wname" "$msg" "$rel"
-}
-
-render_entry_narrow() {
-    local i="$1" cat="$2"
-    local clr icon sesswin rel
-    clr="$(color_for "$cat")"
-    icon="$(icon_for "$cat")"
-    sesswin="${E_SESSION[$i]}:${E_WINDOW[$i]}"
-    rel="$(relative_time "${E_TS[$i]}")"
-
-    # Narrow: just index, icon, session:win, time
-    printf '  \033[%sm%s\033[0m %s %-*s %s\n' \
-        "$clr" "$i" "$icon" "$MAX_SESSWIN" "$sesswin" "$rel"
-}
-
-render_section() {
-    local cat="$1" label="$2" cols="$3"
-    local has=0
-    for i in $(seq 1 "$INDEX"); do
-        [ "${E_CAT[$i]}" = "$cat" ] || continue
-        if [ "$has" -eq 0 ]; then
-            printf '\n  \033[1m%s\033[0m\n' "$label"
-            has=1
-        fi
-        if [ "$cols" -ge 100 ]; then
-            render_entry_wide "$i" "$cat"
-        elif [ "$cols" -ge 60 ]; then
-            render_entry_medium "$i" "$cat"
-        else
-            render_entry_narrow "$i" "$cat"
-        fi
-    done
+section_label() {
+    case "$1" in
+        working)  printf 'WORKING' ;;
+        waiting)  printf 'WAITING' ;;
+        finished) printf 'FINISHED' ;;
+        idle)     printf 'IDLE' ;;
+    esac
 }
 
 render() {
@@ -254,27 +287,38 @@ render() {
         printf '  ───────────────\n'
     fi
 
-    if [ "$INDEX" -eq 0 ]; then
+    if [ "$DISPLAY_COUNT" -eq 0 ]; then
         printf '\n    No active sessions.\n\n'
         printf '  [q] quit\n'
         return
     fi
 
-    render_section working  "WORKING"  "$cols"
-    render_section waiting  "WAITING"  "$cols"
-    render_section finished "FINISHED" "$cols"
-    render_section idle     "IDLE"     "$cols"
+    # Render entries in display order, showing section headers when category changes
+    local last_cat="" pos i cat label
+    for pos in $(seq 1 "$DISPLAY_COUNT"); do
+        i="${DISPLAY_ORDER[$pos]}"
+        cat="${E_CAT[$i]}"
+        if [ "$cat" != "$last_cat" ]; then
+            label="$(section_label "$cat")"
+            printf '\n  \033[1m%s\033[0m\n' "$label"
+            last_cat="$cat"
+        fi
+        render_entry "$pos" "$i" "$cat" "$cols"
+    done
 
-    printf '\n  [1-%d] goto  [c] clear all  [q] quit\n' "$INDEX"
+    local max_key
+    max_key="$(pos_to_key "$DISPLAY_COUNT")"
+    printf '\n  [↑↓/jk] navigate  [Enter] select  [1-%s] goto  [r] refresh  [c] clear  [q] quit\n' "$max_key"
 }
 
 goto_entry() {
-    local num="$1"
-    if [ "$num" -ge 1 ] 2>/dev/null && [ "$num" -le "$INDEX" ] 2>/dev/null; then
-        local sess="${E_SESSION[$num]}"
-        local win="${E_WINDOW[$num]}"
+    local pos="$1"
+    if [ "$pos" -ge 1 ] 2>/dev/null && [ "$pos" -le "$DISPLAY_COUNT" ] 2>/dev/null; then
+        local i="${DISPLAY_ORDER[$pos]}"
+        local sess="${E_SESSION[$i]}"
+        local win="${E_WINDOW[$i]}"
         # Clear notification if it was one (waiting or finished)
-        if [ "${E_CAT[$num]}" = "waiting" ] || [ "${E_CAT[$num]}" = "finished" ]; then
+        if [ "${E_CAT[$i]}" = "waiting" ] || [ "${E_CAT[$i]}" = "finished" ]; then
             local safe_sess
             safe_sess="$(printf '%s' "$sess" | tr '/ ' '__')"
             rm -f "${NOTIF_DIR}/${safe_sess}_${win}"
@@ -287,10 +331,10 @@ goto_entry() {
 }
 
 load_entries
+# Ensure cursor is valid
+[ "$CURSOR" -gt "$DISPLAY_COUNT" ] && CURSOR=$DISPLAY_COUNT
+[ "$CURSOR" -lt 1 ] && CURSOR=1
 render
-
-# Input buffer for multi-digit numbers
-NUMBUF=""
 
 # Ensure we're reading from the terminal (fixes tmux popup issues)
 if [ -t 0 ]; then
@@ -299,45 +343,53 @@ else
     exec </dev/tty 2>/dev/null || exec 0<&1 2>/dev/null || true
 fi
 
+move_cursor() {
+    local delta="$1"
+    CURSOR=$(( CURSOR + delta ))
+    [ "$CURSOR" -lt 1 ] && CURSOR=$DISPLAY_COUNT      # wrap to bottom
+    [ "$CURSOR" -gt "$DISPLAY_COUNT" ] && CURSOR=1    # wrap to top
+    render
+}
+
 while true; do
-    if [ -n "$NUMBUF" ]; then
-        # Wait briefly for more digits, then process
-        read -rsn1 -t 0.5 key 2>/dev/null || key=""
-    else
-        # Always use a timeout to prevent blocking issues
-        read -rsn1 -t 1 key 2>/dev/null || key=""
-    fi
+    read -rsn1 key 2>/dev/null || key=""
 
     case "$key" in
         q|Q)
-            [ -z "$NUMBUF" ] && exit 0
-            NUMBUF=""
+            exit 0
+            ;;
+        $'\x1b')  # Escape sequence (arrow keys)
+            read -rsn2 -t 0.1 seq 2>/dev/null || seq=""
+            case "$seq" in
+                '[A') move_cursor -1 ;;  # Up arrow
+                '[B') move_cursor 1 ;;   # Down arrow
+            esac
+            ;;
+        k|K)  # Vim up
+            move_cursor -1
+            ;;
+        j|J)  # Vim down
+            move_cursor 1
+            ;;
+        "")  # Enter key
+            goto_entry "$CURSOR"
+            ;;
+        r|R)
+            load_entries
+            [ "$CURSOR" -gt "$DISPLAY_COUNT" ] && CURSOR=$DISPLAY_COUNT
+            [ "$CURSOR" -lt 1 ] && CURSOR=1
+            render
             ;;
         c|C)
-            if [ -z "$NUMBUF" ]; then
-                rm -f "$NOTIF_DIR"/*
-                load_entries
-                render
-            else
-                NUMBUF=""
-            fi
+            rm -f "$NOTIF_DIR"/*
+            load_entries
+            [ "$CURSOR" -gt "$DISPLAY_COUNT" ] && CURSOR=$DISPLAY_COUNT
+            [ "$CURSOR" -lt 1 ] && CURSOR=1
+            render
             ;;
-        [0-9])
-            NUMBUF="${NUMBUF}${key}"
-            # If the number is already larger than INDEX, process immediately
-            if [ "$NUMBUF" -gt "$INDEX" ] 2>/dev/null; then
-                NUMBUF=""
-            fi
-            ;;
-        "")
-            # Timeout or enter — process buffered number
-            if [ -n "$NUMBUF" ]; then
-                goto_entry "$NUMBUF"
-                NUMBUF=""
-            fi
-            ;;
-        *)
-            NUMBUF=""
+        [1-9a-bd-il-ps-z])  # Direct key shortcuts (excluding c,j,k,q,r)
+            pos="$(key_to_pos "$key" 2>/dev/null)" || continue
+            [ -n "$pos" ] && [ "$pos" -ge 1 ] && [ "$pos" -le "$DISPLAY_COUNT" ] && goto_entry "$pos"
             ;;
     esac
 done
