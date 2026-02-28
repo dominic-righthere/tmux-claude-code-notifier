@@ -305,6 +305,7 @@ cmd_help() {
 /run &lt;n&gt; &lt;cmd&gt; — Run command in session
 /restart — Restart all Claude Code sessions
 /restart &lt;ver&gt; — Install version, then restart
+/doctor — Run diagnostics
 /help — This message
 MSG
 )"
@@ -505,6 +506,18 @@ cmd_run() {
     fi
 }
 
+cmd_doctor() {
+    local output
+    output="$("${SCRIPT_DIR}/doctor.sh" --quiet 2>&1)" || true
+    if [ -z "$output" ]; then
+        output="All checks passed."
+    fi
+    if [ "${#output}" -gt 3800 ]; then
+        output="...${output:$((${#output} - 3800))}"
+    fi
+    send_message "<pre>$(html_escape "$output")</pre>"
+}
+
 cmd_restart() {
     local version="${1:-}"
     local args="--yes"
@@ -661,6 +674,9 @@ dispatch_message() {
         /restart)
             cmd_restart "$args"
             ;;
+        /doctor)
+            cmd_doctor
+            ;;
         *)
             send_message "Unknown command. Type /help for available commands."
             ;;
@@ -690,6 +706,7 @@ cmd_run_daemon() {
                 {"command": "send", "description": "Send text to session"},
                 {"command": "run", "description": "Run command in session"},
                 {"command": "restart", "description": "Restart all Claude sessions"},
+                {"command": "doctor", "description": "Run diagnostics"},
                 {"command": "help", "description": "Show all commands"}
             ]
         }' >/dev/null 2>&1 || true

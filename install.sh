@@ -36,6 +36,7 @@ fi
 
 # 3. Make scripts executable
 printf '  Making scripts executable...\n'
+chmod +x "${SCRIPT_DIR}/lib.sh"
 chmod +x "${SCRIPT_DIR}/notify.sh"
 chmod +x "${SCRIPT_DIR}/dispatch.sh"
 chmod +x "${SCRIPT_DIR}/dashboard.sh"
@@ -49,6 +50,7 @@ chmod +x "${SCRIPT_DIR}/telegram-setup.sh"
 chmod +x "${SCRIPT_DIR}/telegram-send.sh"
 chmod +x "${SCRIPT_DIR}/telegram.sh"
 chmod +x "${SCRIPT_DIR}/restart.sh"
+chmod +x "${SCRIPT_DIR}/doctor.sh"
 
 # 4. Merge hooks into ~/.claude/settings.json
 printf '  Configuring Claude Code hooks...\n'
@@ -110,6 +112,12 @@ else
         CONTENT="${CONTENT%$'\n'}"
     done
     printf '%s\n\n%s\n' "$CONTENT" "$NOTIFIER_BLOCK" > "$TMUX_CONF"
+fi
+
+# 6. Record installed version
+if [ -f "${SCRIPT_DIR}/VERSION" ]; then
+    cp "${SCRIPT_DIR}/VERSION" "${DATA_DIR}/installed_version"
+    printf '  Recorded version %s\n' "$(<"${SCRIPT_DIR}/VERSION")"
 fi
 
 printf '\n  Installation complete!\n\n'

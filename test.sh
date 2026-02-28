@@ -739,6 +739,81 @@ else
 fi
 
 # =============================================================================
+# Doctor / Version Tests
+# =============================================================================
+printf "\n${YELLOW}=== Doctor / Version Tests ===${NC}\n"
+
+# Test 51: VERSION file exists and matches semver
+run_test
+if [ -f ./VERSION ]; then
+    ver="$(<./VERSION)"
+    ver="${ver%$'\n'}"
+    if [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        pass "VERSION file exists and matches semver (${ver})"
+    else
+        fail "VERSION file matches semver" "Got: '${ver}'"
+    fi
+else
+    fail "VERSION file exists"
+fi
+
+# Test 52: doctor.sh exists and is executable
+run_test
+if [ -x ./doctor.sh ]; then
+    pass "doctor.sh is executable"
+else
+    fail "doctor.sh is executable"
+fi
+
+# Test 53: doctor.sh --help shows usage
+run_test
+output=$(./doctor.sh --help 2>&1)
+if [[ "$output" == *"--quiet"* ]] && [[ "$output" == *"diagnostics"* ]]; then
+    pass "doctor.sh --help shows usage"
+else
+    fail "doctor.sh --help shows usage" "Got: $output"
+fi
+
+# Test 54: install.sh copies VERSION to installed_version
+run_test
+if grep -q 'installed_version' ./install.sh; then
+    pass "install.sh records installed version"
+else
+    fail "install.sh records installed version"
+fi
+
+# Test 55: doctor.sh checks all 7 hook events
+run_test
+hook_count=0
+for hook in SessionStart SessionEnd UserPromptSubmit PreToolUse Stop Notification PermissionRequest; do
+    if grep -q "$hook" ./doctor.sh; then
+        hook_count=$((hook_count + 1))
+    fi
+done
+if [ "$hook_count" -eq 7 ]; then
+    pass "doctor.sh checks all 7 hook events"
+else
+    fail "doctor.sh checks all 7 hook events" "Found $hook_count, expected 7"
+fi
+
+# Test 56: doctor.sh --quiet only shows problems
+run_test
+output=$(./doctor.sh --quiet 2>&1) || true
+if [[ "$output" != *"PASS"* ]]; then
+    pass "doctor.sh --quiet hides PASS lines"
+else
+    fail "doctor.sh --quiet hides PASS lines" "Output contained PASS"
+fi
+
+# Test 57: install.sh makes doctor.sh executable
+run_test
+if grep -q 'doctor.sh' ./install.sh; then
+    pass "install.sh includes doctor.sh"
+else
+    fail "install.sh includes doctor.sh"
+fi
+
+# =============================================================================
 # Summary
 # =============================================================================
 printf "\n${YELLOW}=== Test Summary ===${NC}\n"
