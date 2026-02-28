@@ -303,6 +303,8 @@ cmd_help() {
 /d &lt;n&gt; — Deny (send "n")
 /send &lt;n&gt; &lt;msg&gt; — Send text to session
 /run &lt;n&gt; &lt;cmd&gt; — Run command in session
+/restart — Restart all Claude Code sessions
+/restart &lt;ver&gt; — Install version, then restart
 /help — This message
 MSG
 )"
@@ -503,6 +505,27 @@ cmd_run() {
     fi
 }
 
+cmd_restart() {
+    local version="${1:-}"
+    local args="--yes"
+    if [ -n "$version" ]; then
+        args="$args --version $version"
+        send_message "Restarting all Claude Code sessions (installing v${version})..."
+    else
+        send_message "Restarting all Claude Code sessions..."
+    fi
+    local output
+    output="$("${SCRIPT_DIR}/restart.sh" $args 2>&1)" || true
+    if [ -z "$output" ]; then
+        output="No output from restart script."
+    fi
+    # Truncate if needed
+    if [ "${#output}" -gt 3800 ]; then
+        output="...${output:$((${#output} - 3800))}"
+    fi
+    send_message "<pre>$(html_escape "$output")</pre>"
+}
+
 # ─── Callback handler (inline keyboard buttons) ──────────────────────────────
 
 handle_callback() {
@@ -635,6 +658,9 @@ dispatch_message() {
             [ "$run_cmd" = "$num" ] && run_cmd=""
             cmd_run "$num" "$run_cmd"
             ;;
+        /restart)
+            cmd_restart "$args"
+            ;;
         *)
             send_message "Unknown command. Type /help for available commands."
             ;;
@@ -663,6 +689,7 @@ cmd_run_daemon() {
                 {"command": "d", "description": "Deny (send n)"},
                 {"command": "send", "description": "Send text to session"},
                 {"command": "run", "description": "Run command in session"},
+                {"command": "restart", "description": "Restart all Claude sessions"},
                 {"command": "help", "description": "Show all commands"}
             ]
         }' >/dev/null 2>&1 || true

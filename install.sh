@@ -48,6 +48,7 @@ chmod +x "${SCRIPT_DIR}/popup.sh"
 chmod +x "${SCRIPT_DIR}/telegram-setup.sh"
 chmod +x "${SCRIPT_DIR}/telegram-send.sh"
 chmod +x "${SCRIPT_DIR}/telegram.sh"
+chmod +x "${SCRIPT_DIR}/restart.sh"
 
 # 4. Merge hooks into ~/.claude/settings.json
 printf '  Configuring Claude Code hooks...\n'

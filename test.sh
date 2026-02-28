@@ -693,6 +693,52 @@ else
 fi
 
 # =============================================================================
+# Restart Tests
+# =============================================================================
+printf "\n${YELLOW}=== Restart Tests ===${NC}\n"
+
+# Test 46: restart.sh exists and is executable
+run_test
+if [ -x ./restart.sh ]; then
+    pass "restart.sh is executable"
+else
+    fail "restart.sh is executable"
+fi
+
+# Test 47: restart.sh --help shows usage
+run_test
+output=$(./restart.sh --help 2>&1)
+if [[ "$output" == *"--yes"* ]] && [[ "$output" == *"--version"* ]]; then
+    pass "restart.sh --help shows usage"
+else
+    fail "restart.sh --help shows usage" "Got: $output"
+fi
+
+# Test 48: telegram.sh has /restart handler
+run_test
+if grep -q '/restart)' ./telegram.sh && grep -q 'cmd_restart' ./telegram.sh; then
+    pass "telegram.sh has /restart handler"
+else
+    fail "telegram.sh has /restart handler"
+fi
+
+# Test 49: restart.sh sources lib.sh
+run_test
+if grep -q 'source.*lib\.sh' ./restart.sh; then
+    pass "restart.sh sources lib.sh"
+else
+    fail "restart.sh sources lib.sh"
+fi
+
+# Test 50: install.sh makes restart.sh executable
+run_test
+if grep -q 'restart.sh' ./install.sh; then
+    pass "install.sh includes restart.sh"
+else
+    fail "install.sh includes restart.sh"
+fi
+
+# =============================================================================
 # Summary
 # =============================================================================
 printf "\n${YELLOW}=== Test Summary ===${NC}\n"
