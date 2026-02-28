@@ -441,6 +441,258 @@ else
 fi
 
 # =============================================================================
+# New Hook Tests (SessionStart, SessionEnd, PreToolUse)
+# =============================================================================
+printf "\n${YELLOW}=== New Hook Tests ===${NC}\n"
+
+# Test 25: SessionStart hook exits cleanly (no tmux)
+run_test
+echo '{"hook_event_name":"SessionStart"}' | ./notify.sh
+exit_code=$?
+if [ "$exit_code" -eq 0 ]; then
+    pass "SessionStart hook exits 0 (no tmux)"
+else
+    fail "SessionStart hook exits 0 (no tmux)" "Exit code was $exit_code"
+fi
+
+# Test 26: SessionEnd hook exits cleanly (no tmux)
+run_test
+echo '{"hook_event_name":"SessionEnd"}' | ./notify.sh
+exit_code=$?
+if [ "$exit_code" -eq 0 ]; then
+    pass "SessionEnd hook exits 0 (no tmux)"
+else
+    fail "SessionEnd hook exits 0 (no tmux)" "Exit code was $exit_code"
+fi
+
+# Test 27: PreToolUse hook exits cleanly (no tmux)
+run_test
+echo '{"hook_event_name":"PreToolUse","tool_name":"Read"}' | ./notify.sh
+exit_code=$?
+if [ "$exit_code" -eq 0 ]; then
+    pass "PreToolUse hook exits 0 (no tmux)"
+else
+    fail "PreToolUse hook exits 0 (no tmux)" "Exit code was $exit_code"
+fi
+
+# Test 28: notify.sh handles all 7 hook events
+run_test
+hook_count=0
+for hook in SessionStart SessionEnd UserPromptSubmit PreToolUse Stop Notification PermissionRequest; do
+    if grep -q "$hook)" ./notify.sh; then
+        hook_count=$((hook_count + 1))
+    fi
+done
+if [ "$hook_count" -eq 7 ]; then
+    pass "notify.sh handles all 7 hook events"
+else
+    fail "notify.sh handles all 7 hook events" "Found $hook_count, expected 7"
+fi
+
+# =============================================================================
+# Dispatcher Tests
+# =============================================================================
+printf "\n${YELLOW}=== Dispatcher Tests ===${NC}\n"
+
+# Test 29: dispatch.sh exists and is executable
+run_test
+if [ -x ./dispatch.sh ]; then
+    pass "dispatch.sh is executable"
+else
+    fail "dispatch.sh is executable"
+fi
+
+# Test 30: dispatch.sh exits cleanly with no backends.conf
+run_test
+_orig_home="${HOME}"
+export HOME="${TEST_DATA_DIR}/fakehome_dispatch"
+mkdir -p "${HOME}/.local/share/claude-notifier"
+./dispatch.sh "finished" "test" "0" "Finished" 2>/dev/null
+exit_code=$?
+export HOME="$_orig_home"
+if [ "$exit_code" -eq 0 ]; then
+    pass "dispatch.sh exits 0 with no backends.conf"
+else
+    fail "dispatch.sh exits 0 with no backends.conf" "Exit code was $exit_code"
+fi
+
+# Test 31: notify.sh uses dispatch.sh instead of telegram-send.sh directly
+run_test
+telegram_direct=$(grep -c 'telegram-send\.sh' ./notify.sh)
+dispatch_calls=$(grep -c 'dispatch\.sh' ./notify.sh)
+if [ "$telegram_direct" -eq 0 ] && [ "$dispatch_calls" -gt 0 ]; then
+    pass "notify.sh uses dispatch.sh (no direct telegram-send.sh calls)"
+else
+    fail "notify.sh uses dispatch.sh" "telegram-send.sh=$telegram_direct, dispatch.sh=$dispatch_calls"
+fi
+
+# Test 32: backends.conf exists with telegram backend
+run_test
+if [ -f ./backends.conf ] && grep -q 'telegram=' ./backends.conf; then
+    pass "backends.conf exists with telegram backend"
+else
+    fail "backends.conf exists with telegram backend"
+fi
+
+# =============================================================================
+# Shared Library Tests
+# =============================================================================
+printf "\n${YELLOW}=== Shared Library Tests ===${NC}\n"
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "${SCRIPT_DIR}/lib.sh"
+
+# Test 33: sanitize_key replaces / and spaces
+run_test
+result=$(sanitize_key "my session/name")
+if [ "$result" = "my_session_name" ]; then
+    pass "sanitize_key replaces / and spaces"
+else
+    fail "sanitize_key replaces / and spaces" "Got: '$result'"
+fi
+
+# Test 34: html_escape escapes &<>
+run_test
+result=$(html_escape "a & b < c > d")
+if [ "$result" = "a &amp; b &lt; c &gt; d" ]; then
+    pass "html_escape escapes &<>"
+else
+    fail "html_escape escapes &<>" "Got: '$result'"
+fi
+
+# Test 35: strip_ansi removes escape codes
+run_test
+result=$(strip_ansi $'\033[31mred\033[0m text')
+if [ "$result" = "red text" ]; then
+    pass "strip_ansi removes escape codes"
+else
+    fail "strip_ansi removes escape codes" "Got: '$result'"
+fi
+
+# Test 36: write_state_file + read_state_field roundtrip
+run_test
+TEST_ROUNDTRIP="${TEST_DATA_DIR}/roundtrip"
+mkdir -p "$TEST_ROUNDTRIP"
+write_state_file "$TEST_ROUNDTRIP" "test_0" "mysess" "0" "bash" "working" "Building..." "1700000000"
+rt_type=$(read_state_field "${TEST_ROUNDTRIP}/test_0" "TYPE")
+rt_msg=$(read_state_field "${TEST_ROUNDTRIP}/test_0" "MESSAGE")
+if [ "$rt_type" = "working" ] && [ "$rt_msg" = "Building..." ]; then
+    pass "write_state_file + read_state_field roundtrip"
+else
+    fail "write_state_file + read_state_field roundtrip" "TYPE=$rt_type, MESSAGE=$rt_msg"
+fi
+
+# Test 37: icon_for returns correct icons
+run_test
+w_icon=$(icon_for "working")
+f_icon=$(icon_for "finished")
+if [ "$w_icon" = "⟳" ] && [ "$f_icon" = "●" ]; then
+    pass "icon_for returns correct icons"
+else
+    fail "icon_for returns correct icons" "working='$w_icon', finished='$f_icon'"
+fi
+
+# Test 38: Scripts source lib.sh
+run_test
+lib_sourcing=0
+for script in notify.sh scan.sh clear.sh dashboard.sh telegram.sh telegram-send.sh; do
+    if grep -q 'source.*lib\.sh' "./$script"; then
+        lib_sourcing=$((lib_sourcing + 1))
+    fi
+done
+if [ "$lib_sourcing" -ge 6 ]; then
+    pass "Core scripts source lib.sh ($lib_sourcing scripts)"
+else
+    fail "Core scripts source lib.sh" "Only $lib_sourcing scripts source lib.sh, expected >= 6"
+fi
+
+# =============================================================================
+# Notification Aging Tests
+# =============================================================================
+printf "\n${YELLOW}=== Notification Aging Tests ===${NC}\n"
+
+# Test 39: dashboard.sh has aging rules for finished and waiting
+run_test
+has_finished_aging=$(grep -c 'finished.*21600' ./dashboard.sh)
+has_waiting_aging=$(grep -c 'waiting.*86400' ./dashboard.sh)
+if [ "$has_finished_aging" -gt 0 ] && [ "$has_waiting_aging" -gt 0 ]; then
+    pass "dashboard.sh has aging rules (finished=6h, waiting=24h)"
+else
+    fail "dashboard.sh has aging rules" "finished=$has_finished_aging, waiting=$has_waiting_aging"
+fi
+
+# Test 40: status.sh has aging checks
+run_test
+has_status_aging=$(grep -c '21600\|86400' ./status.sh)
+if [ "$has_status_aging" -ge 2 ]; then
+    pass "status.sh has aging checks"
+else
+    fail "status.sh has aging checks" "Found $has_status_aging aging references"
+fi
+
+# =============================================================================
+# Telegram Dedup Tests
+# =============================================================================
+printf "\n${YELLOW}=== Telegram Dedup Tests ===${NC}\n"
+
+# Test 41: telegram-send.sh has editMessageText support
+run_test
+if grep -q 'editMessageText' ./telegram-send.sh; then
+    pass "telegram-send.sh supports editMessageText"
+else
+    fail "telegram-send.sh supports editMessageText"
+fi
+
+# Test 42: telegram-send.sh creates msg_id directory
+run_test
+if grep -q 'telegram_msg_ids' ./telegram-send.sh; then
+    pass "telegram-send.sh uses message ID tracking directory"
+else
+    fail "telegram-send.sh uses message ID tracking directory"
+fi
+
+# =============================================================================
+# Install/Uninstall Tests
+# =============================================================================
+printf "\n${YELLOW}=== Install/Uninstall Tests ===${NC}\n"
+
+# Test 43: install.sh registers all 7 hooks
+run_test
+hook_count=0
+for hook in SessionStart SessionEnd UserPromptSubmit PreToolUse Stop Notification PermissionRequest; do
+    if grep -q "hooks\.$hook" ./install.sh; then
+        hook_count=$((hook_count + 1))
+    fi
+done
+if [ "$hook_count" -eq 7 ]; then
+    pass "install.sh registers all 7 hooks"
+else
+    fail "install.sh registers all 7 hooks" "Found $hook_count, expected 7"
+fi
+
+# Test 44: uninstall.sh removes all 7 hooks
+run_test
+unhook_count=0
+for hook in SessionStart SessionEnd UserPromptSubmit PreToolUse Stop Notification PermissionRequest; do
+    if grep -q "hooks\.$hook" ./uninstall.sh; then
+        unhook_count=$((unhook_count + 1))
+    fi
+done
+if [ "$unhook_count" -eq 7 ]; then
+    pass "uninstall.sh removes all 7 hooks"
+else
+    fail "uninstall.sh removes all 7 hooks" "Found $unhook_count, expected 7"
+fi
+
+# Test 45: install.sh installs backends.conf
+run_test
+if grep -q 'backends.conf' ./install.sh; then
+    pass "install.sh installs backends.conf"
+else
+    fail "install.sh installs backends.conf"
+fi
+
+# =============================================================================
 # Summary
 # =============================================================================
 printf "\n${YELLOW}=== Test Summary ===${NC}\n"

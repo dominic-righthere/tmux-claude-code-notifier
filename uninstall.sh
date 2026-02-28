@@ -17,7 +17,10 @@ if [ -f "$SETTINGS_FILE" ]; then
     else
         printf '  Removing hooks from settings.json...\n'
         jq '
+          del(.hooks.SessionStart) |
+          del(.hooks.SessionEnd) |
           del(.hooks.UserPromptSubmit) |
+          del(.hooks.PreToolUse) |
           del(.hooks.Stop) |
           del(.hooks.Notification) |
           del(.hooks.PermissionRequest) |

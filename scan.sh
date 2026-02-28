@@ -3,6 +3,8 @@
 # Discovers all tmux panes running Claude Code and registers untracked ones as idle
 set -uo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "${SCRIPT_DIR}/lib.sh"
 DATA_DIR="${HOME}/.local/share/claude-notifier"
 ACTIVE_DIR="${DATA_DIR}/active"
 NOTIF_DIR="${DATA_DIR}/notifications"
@@ -16,7 +18,7 @@ while IFS='|' read -r sess win wname cmd; do
     [[ "$cmd" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
 
     # Build file key (same format as notify.sh)
-    safe_sess="$(printf '%s' "$sess" | tr '/ ' '__')"
+    safe_sess="$(sanitize_key "$sess")"
     key="${safe_sess}_${win}"
 
     # Skip if already tracked (active or notification)
@@ -24,9 +26,7 @@ while IFS='|' read -r sess win wname cmd; do
     [ -f "${NOTIF_DIR}/${key}" ] && continue
 
     # Register as idle
-    printf 'SESSION=%s\nWINDOW=%s\nWINDOW_NAME=%s\nMESSAGE=%s\nTYPE=%s\nTIMESTAMP=%s\n' \
-        "$sess" "$win" "$wname" "Idle" "idle" "$NOW" \
-        > "${ACTIVE_DIR}/${key}"
+    write_state_file "$ACTIVE_DIR" "$key" "$sess" "$win" "$wname" "idle" "Idle" "$NOW"
     REGISTERED=$(( REGISTERED + 1 ))
 done < <(tmux list-panes -a -F "#{session_name}|#{window_index}|#{window_name}|#{pane_current_command}" 2>/dev/null)
 

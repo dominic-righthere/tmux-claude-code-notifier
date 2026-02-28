@@ -5,12 +5,65 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "${SCRIPT_DIR}/lib.sh"
 DATA_DIR="${HOME}/.local/share/claude-notifier"
 CONFIG_FILE="${DATA_DIR}/telegram.conf"
 PID_FILE="${DATA_DIR}/telegram.pid"
 LOG_FILE="${DATA_DIR}/telegram.log"
 ACTIVE_DIR="${DATA_DIR}/active"
 NOTIF_DIR="${DATA_DIR}/notifications"
+
+# Strip leading/trailing blank lines (macOS-compatible)
+trim_blank_lines() {
+    local line lines=() started=0
+    while IFS= read -r line; do
+        if [ "$started" -eq 0 ]; then
+            [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+            started=1
+        fi
+        lines+=("$line")
+    done
+    # Remove trailing blank lines
+    local i=$(( ${#lines[@]} - 1 ))
+    while [ "$i" -ge 0 ] && [[ "${lines[$i]}" =~ ^[[:space:]]*$ ]]; do
+        unset 'lines[$i]'
+        i=$(( i - 1 ))
+    done
+    printf '%s\n' "${lines[@]}"
+}
+
+# Reflow captured terminal output for Telegram readability.
+# Claude Code hard-wraps output at the pane width. This rejoins wrapped prose
+# while preserving structural lines (markers, diffs, lists, prompts).
+# Usage: reflow_for_telegram [pane_width]
+reflow_for_telegram() {
+    local width="${1:-120}"
+    awk -v thr="$((width - 5))" '
+    function structural(s) {
+        if (s ~ /^[[:space:]]*(⏺|⎿|❯|✻)/) return 1
+        if (s ~ /…/) return 1
+        if (s ~ /^[[:space:]]+[0-9]+[[:space:]]+[-+|]/) return 1
+        if (s ~ /^[[:space:]]+[-*][ ]/) return 1
+        if (s ~ /^[[:space:]]+[0-9]+\.[ ]/) return 1
+        if (s ~ /^[[:space:]]*[$>][ ]/) return 1
+        if (s ~ /^(===|---)/) return 1
+        return 0
+    }
+    {
+        rlen = length($0)
+        if ($0 ~ /^[[:space:]]*$/) {
+            if (buf != "") print buf; buf = ""; print; pl = 0
+        } else if (structural($0)) {
+            if (buf != "") print buf; buf = $0; pl = rlen
+        } else if (pl >= thr && buf != "") {
+            sub(/^[[:space:]]+/, ""); buf = buf " " $0; pl = rlen
+        } else {
+            if (buf != "") print buf; buf = $0; pl = rlen
+        }
+    }
+    END { if (buf != "") print buf }
+    '
+}
 
 # Check dependencies
 for cmd in curl jq tmux; do
@@ -153,19 +206,58 @@ get_session() {
     return 1
 }
 
-icon_for() {
-    case "$1" in
-        working)  printf '⟳' ;;
-        waiting)  printf '⏳' ;;
-        finished) printf '●' ;;
-        idle)     printf '○' ;;
-    esac
+
+
+
+# Get enriched session info: project name, mode, task hint
+# Usage: get_session_info "session" "window"
+# Sets: CTX_PROJECT, CTX_MODE, CTX_MODE_ICON, CTX_TASK
+get_session_info() {
+    local sess="$1" win="$2"
+    CTX_PROJECT="" CTX_MODE="" CTX_MODE_ICON="" CTX_TASK=""
+
+    # Get project name from pane current path
+    local pane_path
+    pane_path="$(tmux display-message -t "${sess}:${win}" -p '#{pane_current_path}' 2>/dev/null)" || pane_path=""
+    if [ -n "$pane_path" ]; then
+        CTX_PROJECT="$(basename "$pane_path")"
+    fi
+
+    # Capture bottom ~5 lines for mode and task detection
+    local bottom
+    bottom="$(tmux capture-pane -t "${sess}:${win}" -J -p -S -8 2>/dev/null | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g')" || bottom=""
+
+    if [ -n "$bottom" ]; then
+        # Mode detection
+        if printf '%s' "$bottom" | grep -qi 'plan mode'; then
+            CTX_MODE="plan mode"
+            CTX_MODE_ICON="⏸"
+        elif printf '%s' "$bottom" | grep -qi 'auto-accept\|accept edits'; then
+            CTX_MODE="auto-accept"
+            CTX_MODE_ICON="⏵⏵"
+        fi
+
+        # Task hint: find last line starting with ❯ (user's prompt)
+        local task_line
+        task_line="$(printf '%s' "$bottom" | grep '❯' | tail -1)" || task_line=""
+        if [ -n "$task_line" ]; then
+            # Strip the ❯ prefix and trim
+            CTX_TASK="${task_line#*❯}"
+            CTX_TASK="${CTX_TASK#"${CTX_TASK%%[![:space:]]*}"}"
+            # Truncate to 60 chars
+            if [ "${#CTX_TASK}" -gt 60 ]; then
+                CTX_TASK="${CTX_TASK:0:57}..."
+            fi
+        fi
+    fi
 }
 
 # ─── Telegram API helpers ────────────────────────────────────────────────────
 
 send_message() {
-    local text="$1"
+    local text
+    # Convert literal \n to real newlines (bash string builders use \n)
+    text="$(printf '%b' "$1")"
     local keyboard="${2:-}"
     local data
 
@@ -205,13 +297,12 @@ cmd_help() {
 <b>Claude Code Notifier</b>
 
 <b>Commands:</b>
-/status, /s — All sessions with status
-/sessions, /ls — Numbered session list
-/view &lt;n&gt;, /v &lt;n&gt; — Last 50 lines of output
-/send &lt;n&gt; &lt;msg&gt; — Send text to Claude pane
-/approve &lt;n&gt;, /a &lt;n&gt; — Send "y" to approve
-/deny &lt;n&gt;, /d &lt;n&gt; — Send "n" to deny
-/run &lt;n&gt; &lt;cmd&gt; — Run command in new window
+/s — Interactive session list
+/v &lt;n&gt; — View session output
+/a &lt;n&gt; — Approve (send "y")
+/d &lt;n&gt; — Deny (send "n")
+/send &lt;n&gt; &lt;msg&gt; — Send text to session
+/run &lt;n&gt; &lt;cmd&gt; — Run command in session
 /help — This message
 MSG
 )"
@@ -223,26 +314,15 @@ cmd_sessions() {
         send_message "No active Claude Code sessions."
         return
     fi
-    local text="<b>Sessions:</b>\n"
-    for entry in "${SESSION_LIST[@]}"; do
-        IFS='|' read -r idx sess win cat msg <<< "$entry"
-        local icon
-        icon="$(icon_for "$cat")"
-        text="${text}\n${idx}. ${icon} <b>${sess}:${win}</b>"
-    done
-    send_message "$text"
-}
 
-cmd_bot_status() {
-    build_session_list
-    if [ "${#SESSION_LIST[@]}" -eq 0 ]; then
-        send_message "No active Claude Code sessions."
-        return
-    fi
-    local text="<b>Session Status:</b>\n"
+    local text="<b>Sessions:</b>\n"
     local last_cat=""
+    local keyboard_rows=""
+
     for entry in "${SESSION_LIST[@]}"; do
         IFS='|' read -r idx sess win cat msg <<< "$entry"
+
+        # Category header
         if [ "$cat" != "$last_cat" ]; then
             local label
             case "$cat" in
@@ -252,12 +332,48 @@ cmd_bot_status() {
             text="${text}\n<b>${label}</b>"
             last_cat="$cat"
         fi
+
+        # Enrich with project/mode/task
+        get_session_info "$sess" "$win"
         local icon
         icon="$(icon_for "$cat")"
-        text="${text}\n  ${idx}. ${icon} ${sess}:${win}"
-        [ -n "$msg" ] && [ "$msg" != "Idle" ] && [ "$msg" != "Working..." ] && text="${text} — ${msg}"
+
+        local line="${idx}. ${icon}"
+        [ -n "$CTX_MODE_ICON" ] && line="${line} ${CTX_MODE_ICON}"
+        line="${line} ${sess}:${win}"
+        [ -n "$CTX_PROJECT" ] && line="${line} (${CTX_PROJECT})"
+        text="${text}\n  ${line}"
+        if [ -n "$CTX_TASK" ]; then
+            text="${text}\n     $(html_escape "$CTX_TASK")"
+        elif [ -n "$msg" ] && [ "$msg" != "Idle" ] && [ "$msg" != "Working..." ]; then
+            text="${text}\n     $(html_escape "$msg")"
+        fi
+
+        # Build keyboard row for this session
+        local row=""
+        if [ "$cat" = "waiting" ]; then
+            row="$(jq -n --arg idx "$idx" --arg s "$sess" --arg w "$win" \
+                '[{text: ("✅ " + $idx), callback_data: ("approve:" + $s + ":" + $w)},
+                  {text: ("❌ " + $idx), callback_data: ("deny:" + $s + ":" + $w)},
+                  {text: ("👁 " + $idx), callback_data: ("view:" + $s + ":" + $w)}]')"
+        else
+            row="$(jq -n --arg idx "$idx" --arg s "$sess" --arg w "$win" \
+                '[{text: ("👁 " + $idx + ". " + $s), callback_data: ("view:" + $s + ":" + $w)}]')"
+        fi
+
+        if [ -n "$keyboard_rows" ]; then
+            keyboard_rows="${keyboard_rows},${row}"
+        else
+            keyboard_rows="${row}"
+        fi
     done
-    send_message "$text"
+
+    # Add refresh button row
+    local refresh_row='[{"text":"🔄 Refresh","callback_data":"sessions:refresh"}]'
+    keyboard_rows="${keyboard_rows},${refresh_row}"
+
+    local keyboard="{\"inline_keyboard\":[${keyboard_rows}]}"
+    send_message "$text" "$keyboard"
 }
 
 cmd_view() {
@@ -267,22 +383,45 @@ cmd_view() {
         send_message "Session #${num} not found. Use /sessions to list."
         return
     fi
-    # Capture last 50 lines, strip ANSI escape codes, cap at 4000 chars
+    # Capture last 200 lines, strip ANSI, reflow for phone readability
+    local rw="${REFLOW_WIDTH:-$(tmux display-message -t "${S_SESS}:${S_WIN}" -p '#{pane_width}' 2>/dev/null || echo 120)}"
     local output
-    output="$(tmux capture-pane -t "${S_SESS}:${S_WIN}" -p -S -50 2>/dev/null | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g')" || {
+    output="$(tmux capture-pane -t "${S_SESS}:${S_WIN}" -J -p -S -200 2>/dev/null \
+        | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' | reflow_for_telegram "$rw")" || {
         send_message "Could not capture output from ${S_SESS}:${S_WIN}"
         return
     }
     # Trim trailing blank lines
-    output="$(printf '%s' "$output" | sed -e :a -e '/^[[:space:]]*$/{ $d; N; ba; }')"
+    output="$(printf '%s' "$output" | trim_blank_lines)"
     if [ -z "$output" ]; then
-        output="(empty)"
+        send_message "<b>${S_SESS}:${S_WIN}</b>\n\n(empty)"
+        return
     fi
-    # Cap at 4000 chars (Telegram message limit is 4096)
-    if [ "${#output}" -gt 4000 ]; then
-        output="${output:0:3997}..."
+
+    # Compact header: session · project
+    get_session_info "$S_SESS" "$S_WIN"
+    local header="${S_SESS}:${S_WIN}"
+    [ -n "$CTX_PROJECT" ] && header="${header} · ${CTX_PROJECT}"
+
+    # Extract preview lines
+    local preview_raw
+    preview_raw="$(extract_preview "$output" 3)"
+    local preview_escaped
+    preview_escaped="$(html_escape "$preview_raw")"
+
+    # Keep the LAST 3800 chars for the expandable section
+    local max_content=3800
+    if [ "${#output}" -gt "$max_content" ]; then
+        output="...${output:$((${#output} - max_content))}"
     fi
-    send_message "<b>${S_SESS}:${S_WIN}</b>\n\n<pre>$(printf '%s' "$output" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')</pre>"
+    local output_escaped
+    output_escaped="$(html_escape "$output")"
+
+    send_message "<b>${header}</b>
+
+${preview_escaped}
+
+<blockquote expandable>${output_escaped}</blockquote>"
 }
 
 cmd_send() {
@@ -347,18 +486,20 @@ cmd_run() {
         return
     }
     tmux send-keys -t "${S_SESS}:${new_win}" "$run_cmd" Enter 2>/dev/null
-    send_message "Running in ${S_SESS}:${new_win}...\n<pre>$(printf '%s' "$run_cmd" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')</pre>"
+    send_message "Running in ${S_SESS}:${new_win}...\n$(html_escape "$run_cmd")"
 
     # Wait for command to produce output, then capture
     sleep 2
+    local rw="${REFLOW_WIDTH:-$(tmux display-message -t "${S_SESS}:${new_win}" -p '#{pane_width}' 2>/dev/null || echo 120)}"
     local output
-    output="$(tmux capture-pane -t "${S_SESS}:${new_win}" -p -S -50 2>/dev/null | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g')" || output=""
-    output="$(printf '%s' "$output" | sed -e :a -e '/^[[:space:]]*$/{ $d; N; ba; }')"
+    output="$(tmux capture-pane -t "${S_SESS}:${new_win}" -J -p -S -50 2>/dev/null \
+        | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' | reflow_for_telegram "$rw")" || output=""
+    output="$(printf '%s' "$output" | trim_blank_lines)"
     if [ -n "$output" ]; then
-        if [ "${#output}" -gt 4000 ]; then
-            output="${output:0:3997}..."
+        if [ "${#output}" -gt 3800 ]; then
+            output="...${output:$((${#output} - 3800))}"
         fi
-        send_message "<b>Output from ${S_SESS}:${new_win}</b>\n\n<pre>$(printf '%s' "$output" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')</pre>"
+        send_message "<b>Output from ${S_SESS}:${new_win}</b>\n\n$(html_escape "$output")"
     fi
 }
 
@@ -366,9 +507,9 @@ cmd_run() {
 
 handle_callback() {
     local callback_id="$1" data="$2"
-    local action sess win
+    local action sess win opt_num
 
-    IFS=':' read -r action sess win <<< "$data"
+    IFS=':' read -r action sess win opt_num <<< "$data"
 
     case "$action" in
         approve)
@@ -381,17 +522,48 @@ handle_callback() {
                 answer_callback "$callback_id" "Denied" || \
                 answer_callback "$callback_id" "Failed"
             ;;
+        opt)
+            tmux send-keys -t "${sess}:${win}" "${opt_num}" 2>/dev/null && \
+                answer_callback "$callback_id" "Sent option ${opt_num}" || \
+                answer_callback "$callback_id" "Failed"
+            ;;
         view)
             answer_callback "$callback_id" ""
-            # Reuse cmd_view logic but need to find the session index
+            local rw="${REFLOW_WIDTH:-$(tmux display-message -t "${sess}:${win}" -p '#{pane_width}' 2>/dev/null || echo 120)}"
             local output
-            output="$(tmux capture-pane -t "${sess}:${win}" -p -S -50 2>/dev/null | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g')" || output="(could not capture)"
-            output="$(printf '%s' "$output" | sed -e :a -e '/^[[:space:]]*$/{ $d; N; ba; }')"
-            [ -z "$output" ] && output="(empty)"
-            if [ "${#output}" -gt 4000 ]; then
-                output="${output:0:3997}..."
+            output="$(tmux capture-pane -t "${sess}:${win}" -J -p -S -200 2>/dev/null \
+                | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' | reflow_for_telegram "$rw")" || output="(could not capture)"
+            output="$(printf '%s' "$output" | trim_blank_lines)"
+            if [ -z "$output" ]; then
+                send_message "<b>${sess}:${win}</b>\n\n(empty)"
+            else
+                # Compact header: session · project
+                get_session_info "$sess" "$win"
+                local cb_header="${sess}:${win}"
+                [ -n "$CTX_PROJECT" ] && cb_header="${cb_header} · ${CTX_PROJECT}"
+
+                # Extract preview lines
+                local cb_preview_raw
+                cb_preview_raw="$(extract_preview "$output" 3)"
+                local cb_preview_escaped
+                cb_preview_escaped="$(html_escape "$cb_preview_raw")"
+
+                if [ "${#output}" -gt 3800 ]; then
+                    output="...${output:$((${#output} - 3800))}"
+                fi
+                local cb_output_escaped
+                cb_output_escaped="$(html_escape "$output")"
+
+                send_message "<b>${cb_header}</b>
+
+${cb_preview_escaped}
+
+<blockquote expandable>${cb_output_escaped}</blockquote>"
             fi
-            send_message "<b>${sess}:${win}</b>\n\n<pre>$(printf '%s' "$output" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')</pre>"
+            ;;
+        sessions)
+            answer_callback "$callback_id" "Refreshing..."
+            cmd_sessions
             ;;
         *)
             answer_callback "$callback_id" "Unknown action"
@@ -412,20 +584,19 @@ dispatch_message() {
     else
         args="${text#* }"
     fi
+    # Strip @botname suffix (Telegram adds it in group chats)
+    cmd="${cmd%%@*}"
 
     case "$cmd" in
         /help|/start)
             cmd_help
             ;;
-        /status|/s)
-            cmd_bot_status
-            ;;
-        /sessions|/ls)
+        /s)
             cmd_sessions
             ;;
-        /view|/v)
+        /v)
             if [ -z "$args" ]; then
-                send_message "Usage: /view &lt;n&gt;"
+                send_message "Usage: /v &lt;n&gt;"
                 return
             fi
             cmd_view "${args%% *}"
@@ -440,16 +611,16 @@ dispatch_message() {
             [ "$msg" = "$num" ] && msg=""
             cmd_send "$num" "$msg"
             ;;
-        /approve|/a)
+        /a)
             if [ -z "$args" ]; then
-                send_message "Usage: /approve &lt;n&gt;"
+                send_message "Usage: /a &lt;n&gt;"
                 return
             fi
             cmd_approve "${args%% *}"
             ;;
-        /deny|/d)
+        /d)
             if [ -z "$args" ]; then
-                send_message "Usage: /deny &lt;n&gt;"
+                send_message "Usage: /d &lt;n&gt;"
                 return
             fi
             cmd_deny "${args%% *}"
@@ -474,7 +645,27 @@ dispatch_message() {
 
 cmd_run_daemon() {
     load_config
+    # Truncate log to last 200 lines on restart (clears stale errors)
+    if [ -f "$LOG_FILE" ]; then
+        tail -200 "$LOG_FILE" > "${LOG_FILE}.tmp" && mv "${LOG_FILE}.tmp" "$LOG_FILE" 2>/dev/null || true
+    fi
     printf '[%s] Telegram bot started (PID %d)\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$$"
+
+    # Register bot command menu with Telegram
+    curl -s --max-time 10 \
+        -X POST "${API_BASE}/setMyCommands" \
+        -H "Content-Type: application/json" \
+        -d '{
+            "commands": [
+                {"command": "s", "description": "Interactive session list"},
+                {"command": "v", "description": "View session output"},
+                {"command": "a", "description": "Approve (send y)"},
+                {"command": "d", "description": "Deny (send n)"},
+                {"command": "send", "description": "Send text to session"},
+                {"command": "run", "description": "Run command in session"},
+                {"command": "help", "description": "Show all commands"}
+            ]
+        }' >/dev/null 2>&1 || true
 
     local offset=0
 

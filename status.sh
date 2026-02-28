@@ -5,35 +5,59 @@ DATA_DIR="${HOME}/.local/share/claude-notifier"
 ACTIVE_DIR="${DATA_DIR}/active"
 NOTIF_DIR="${DATA_DIR}/notifications"
 
+NOW="$(date +%s)"
+
 WORKING=0
 IDLE=0
 WAITING=0
 FINISHED=0
 
-# Count active entries by type (working vs idle)
+# Count active entries by type (working vs idle), skip aged-out
 if [ -d "$ACTIVE_DIR" ]; then
     for f in "$ACTIVE_DIR"/*; do
         [ -f "$f" ] || continue
+        _type="" _ts=""
         while IFS= read -r line; do
             case "$line" in
-                TYPE=idle) IDLE=$(( IDLE + 1 )); break ;;
-                TYPE=*) WORKING=$(( WORKING + 1 )); break ;;
+                TYPE=*) _type="${line#TYPE=}" ;;
+                TIMESTAMP=*) _ts="${line#TIMESTAMP=}" ;;
             esac
         done < "$f"
+        # Skip aged-out entries
+        if [ -n "$_ts" ]; then
+            _age=$(( NOW - _ts ))
+            [ "$_type" = "working" ] && [ "$_age" -gt 3600 ] && continue   # 1h
+            [ "$_type" = "idle" ] && [ "$_age" -gt 43200 ] && continue     # 12h
+        fi
+        case "$_type" in
+            idle) IDLE=$(( IDLE + 1 )) ;;
+            *)    WORKING=$(( WORKING + 1 )) ;;
+        esac
     done
 fi
 
-# Count notification entries by type
+# Count notification entries by type, skip aged-out
 if [ -d "$NOTIF_DIR" ]; then
     for f in "$NOTIF_DIR"/*; do
         [ -f "$f" ] || continue
+        _type="" _ts=""
         while IFS= read -r line; do
             case "$line" in
-                TYPE=waiting) WAITING=$(( WAITING + 1 )); break ;;
-                TYPE=finished) FINISHED=$(( FINISHED + 1 )); break ;;
-                TYPE=*) FINISHED=$(( FINISHED + 1 )); break ;;
+                TYPE=*) _type="${line#TYPE=}" ;;
+                TIMESTAMP=*) _ts="${line#TIMESTAMP=}" ;;
             esac
         done < "$f"
+        # Skip aged-out entries
+        if [ -n "$_ts" ]; then
+            _age=$(( NOW - _ts ))
+            [ "$_type" = "finished" ] && [ "$_age" -gt 21600 ] && continue  # 6h
+            [ "$_type" = "waiting" ] && [ "$_age" -gt 86400 ] && continue   # 24h
+        fi
+        case "$_type" in
+            waiting)  WAITING=$(( WAITING + 1 )) ;;
+            finished) FINISHED=$(( FINISHED + 1 )) ;;
+            *)        FINISHED=$(( FINISHED + 1 )) ;;
+        esac
     done
 fi
 

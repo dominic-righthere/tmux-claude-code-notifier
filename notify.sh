@@ -4,6 +4,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "${SCRIPT_DIR}/lib.sh"
 DATA_DIR="${HOME}/.local/share/claude-notifier"
 ACTIVE_DIR="${DATA_DIR}/active"
 NOTIF_DIR="${DATA_DIR}/notifications"
@@ -28,6 +29,7 @@ extract_json_value() {
 EVENT="$(extract_json_value "$INPUT" "hook_event_name")"
 MSG="$(extract_json_value "$INPUT" "message")"
 TOOL_NAME="$(extract_json_value "$INPUT" "tool_name")"
+TOOL_INPUT="$(extract_json_value "$INPUT" "tool_input")"
 
 # Exit if we couldn't parse the event
 [ -z "$EVENT" ] && exit 0
@@ -46,49 +48,48 @@ IFS='|' read -r SESSION WINDOW WINDOW_NAME <<< "$_tmux_info"
 [ -z "$SESSION" ] && exit 0
 [ -z "$WINDOW" ] && exit 0
 
-# Sanitize session name for filename (replace / and spaces with _)
-SAFE_SESSION="$(printf '%s' "$SESSION" | tr '/ ' '__')"
+SAFE_SESSION="$(sanitize_key "$SESSION")"
 KEY="${SAFE_SESSION}_${WINDOW}"
 
 NOW="$(date +%s)"
 
 write_file() {
     local dir="$1" type="$2" message="$3"
-    # Pure bash file write (avoids python3 spawn overhead ~50-80ms)
-    printf 'SESSION=%s\nWINDOW=%s\nWINDOW_NAME=%s\nMESSAGE=%s\nTYPE=%s\nTIMESTAMP=%s\n' \
-        "$SESSION" "$WINDOW" "$WINDOW_NAME" "$message" "$type" "$NOW" \
-        > "${dir}/${KEY}"
+    write_state_file "$dir" "$KEY" "$SESSION" "$WINDOW" "$WINDOW_NAME" "$type" "$message" "$NOW"
 }
 
-read_type() {
-    local file="$1"
-    [ -f "$file" ] || return 1
-    while IFS= read -r line; do
-        case "$line" in
-            TYPE=*) printf '%s' "${line#TYPE=}"; return 0 ;;
-        esac
-    done < "$file"
-    return 1
-}
 
 case "$EVENT" in
+    SessionStart)
+        # New Claude Code session — register immediately
+        write_file "$ACTIVE_DIR" "working" "Starting..."
+        ;;
+    SessionEnd)
+        # Session closed — clean up both directories
+        rm -f "${ACTIVE_DIR}/${KEY}" "${NOTIF_DIR}/${KEY}"
+        ;;
     UserPromptSubmit)
         # Claude is working — mark active, clear any existing notification
         write_file "$ACTIVE_DIR" "working" "Working..."
         rm -f "${NOTIF_DIR}/${KEY}"
         ;;
+    PreToolUse)
+        # Live tool activity — show what Claude is doing instead of "Working..."
+        tool_label="${TOOL_NAME:-tool}"
+        write_file "$ACTIVE_DIR" "working" "${tool_label}..."
+        ;;
     Stop)
         # Claude finished — mark as idle (keep in active dir for visibility)
         write_file "$ACTIVE_DIR" "idle" "Idle"
         # Don't overwrite a waiting notification (permission request / notification)
-        EXISTING_TYPE="$(read_type "${NOTIF_DIR}/${KEY}" 2>/dev/null)" || EXISTING_TYPE=""
+        EXISTING_TYPE="$(read_state_field "${NOTIF_DIR}/${KEY}" "TYPE" 2>/dev/null)" || EXISTING_TYPE=""
         if [ "$EXISTING_TYPE" = "waiting" ]; then
             # Keep the existing waiting notification, just ring bell
             printf '\a'
         else
             write_file "$NOTIF_DIR" "finished" "Finished"
             printf '\a'
-            "${SCRIPT_DIR}/telegram-send.sh" "finished" "$SESSION" "$WINDOW" "Finished" &
+            "${SCRIPT_DIR}/dispatch.sh" "finished" "$SESSION" "$WINDOW" "Finished" &
         fi
         ;;
     Notification)
@@ -99,7 +100,7 @@ case "$EVENT" in
         fi
         write_file "$NOTIF_DIR" "waiting" "$MSG"
         printf '\a'
-        "${SCRIPT_DIR}/telegram-send.sh" "waiting" "$SESSION" "$WINDOW" "$MSG" &
+        "${SCRIPT_DIR}/dispatch.sh" "waiting" "$SESSION" "$WINDOW" "$MSG" &
         ;;
     PermissionRequest)
         # Permission needed — record as waiting with tool name
@@ -109,7 +110,7 @@ case "$EVENT" in
         fi
         write_file "$NOTIF_DIR" "waiting" "$local_msg"
         printf '\a'
-        "${SCRIPT_DIR}/telegram-send.sh" "waiting" "$SESSION" "$WINDOW" "$local_msg" "$TOOL_NAME" &
+        "${SCRIPT_DIR}/dispatch.sh" "waiting" "$SESSION" "$WINDOW" "$local_msg" "$TOOL_NAME" &
         ;;
 esac
 

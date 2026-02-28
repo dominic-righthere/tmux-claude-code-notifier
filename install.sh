@@ -26,9 +26,18 @@ fi
 printf '  Creating data directories...\n'
 mkdir -p "${DATA_DIR}/active" "${DATA_DIR}/notifications"
 
-# 2. Make scripts executable
+# 2. Install default backends.conf (preserve existing)
+if [ ! -f "${DATA_DIR}/backends.conf" ]; then
+    cp "${SCRIPT_DIR}/backends.conf" "${DATA_DIR}/backends.conf"
+    printf '  Installed default backends.conf\n'
+else
+    printf '  backends.conf already exists, skipping\n'
+fi
+
+# 3. Make scripts executable
 printf '  Making scripts executable...\n'
 chmod +x "${SCRIPT_DIR}/notify.sh"
+chmod +x "${SCRIPT_DIR}/dispatch.sh"
 chmod +x "${SCRIPT_DIR}/dashboard.sh"
 chmod +x "${SCRIPT_DIR}/status.sh"
 chmod +x "${SCRIPT_DIR}/clear.sh"
@@ -40,7 +49,7 @@ chmod +x "${SCRIPT_DIR}/telegram-setup.sh"
 chmod +x "${SCRIPT_DIR}/telegram-send.sh"
 chmod +x "${SCRIPT_DIR}/telegram.sh"
 
-# 3. Merge hooks into ~/.claude/settings.json
+# 4. Merge hooks into ~/.claude/settings.json
 printf '  Configuring Claude Code hooks...\n'
 
 if [ ! -f "$SETTINGS_FILE" ]; then
@@ -50,15 +59,18 @@ fi
 
 jq --arg cmd "${SCRIPT_DIR}/notify.sh" '
   .hooks = (.hooks // {}) |
+  .hooks.SessionStart = [{"matcher": "", "hooks": [{"type": "command", "command": $cmd}]}] |
+  .hooks.SessionEnd = [{"matcher": "", "hooks": [{"type": "command", "command": $cmd}]}] |
   .hooks.UserPromptSubmit = [{"matcher": "", "hooks": [{"type": "command", "command": $cmd}]}] |
+  .hooks.PreToolUse = [{"matcher": "", "hooks": [{"type": "command", "command": $cmd}]}] |
   .hooks.Stop = [{"matcher": "", "hooks": [{"type": "command", "command": $cmd}]}] |
   .hooks.Notification = [{"matcher": "", "hooks": [{"type": "command", "command": $cmd}]}] |
   .hooks.PermissionRequest = [{"matcher": "", "hooks": [{"type": "command", "command": $cmd}]}]
 ' "$SETTINGS_FILE" > "${SETTINGS_FILE}.tmp" && mv "${SETTINGS_FILE}.tmp" "$SETTINGS_FILE"
 
-printf '  Hooks configured for: UserPromptSubmit, Stop, Notification, PermissionRequest\n'
+printf '  Hooks configured for: SessionStart, SessionEnd, UserPromptSubmit, PreToolUse, Stop, Notification, PermissionRequest\n'
 
-# 4. Add tmux configuration
+# 5. Add tmux configuration
 printf '  Configuring tmux...\n'
 
 if [ ! -f "$TMUX_CONF" ]; then

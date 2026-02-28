@@ -4,6 +4,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "${SCRIPT_DIR}/lib.sh"
 DATA_DIR="${HOME}/.local/share/claude-notifier"
 ACTIVE_DIR="${DATA_DIR}/active"
 NOTIF_DIR="${DATA_DIR}/notifications"
@@ -132,12 +133,16 @@ cleanup_stale() {
         # If window doesn't exist in session, remove file
         elif [ -n "$sess" ] && [ -n "$win" ] && ! tmux list-windows -t "$sess" -F '#{window_index}' 2>/dev/null | grep -qx "$win"; then
             rm -f "$f"
-        # Remove stale entries based on age: working > 1h, idle > 12h
+        # Remove stale entries based on age
         elif [ -n "$ts" ]; then
             local age=$(( NOW - ts ))
-            if [ "$type" = "working" ] && [ "$age" -gt 3600 ]; then
+            if [ "$type" = "working" ] && [ "$age" -gt 3600 ]; then       # 1h
                 rm -f "$f"
-            elif [ "$type" = "idle" ] && [ "$age" -gt 43200 ]; then
+            elif [ "$type" = "idle" ] && [ "$age" -gt 43200 ]; then       # 12h
+                rm -f "$f"
+            elif [ "$type" = "finished" ] && [ "$age" -gt 21600 ]; then   # 6h
+                rm -f "$f"
+            elif [ "$type" = "waiting" ] && [ "$age" -gt 86400 ]; then    # 24h
                 rm -f "$f"
             fi
         fi
@@ -199,15 +204,6 @@ load_entries() {
 
     # Build display order for navigation
     build_display_order
-}
-
-icon_for() {
-    case "$1" in
-        working) printf '⟳' ;;
-        waiting) printf '⏳' ;;
-        finished) printf '●' ;;
-        idle)    printf '○' ;;
-    esac
 }
 
 color_for() {
@@ -384,7 +380,7 @@ goto_entry() {
         # Clear notification if it was one (waiting or finished)
         if [ "${E_CAT[$i]}" = "waiting" ] || [ "${E_CAT[$i]}" = "finished" ]; then
             local safe_sess
-            safe_sess="$(printf '%s' "$sess" | tr '/ ' '__')"
+            safe_sess="$(sanitize_key "$sess")"
             rm -f "${NOTIF_DIR}/${safe_sess}_${win}"
         fi
         # Switch to session and window

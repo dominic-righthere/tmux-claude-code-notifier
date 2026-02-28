@@ -143,8 +143,31 @@ else
     printf ' failed.\n  Warning: %s\n' "$(printf '%s' "$test_response" | jq -r '.description // "Unknown error"' 2>/dev/null)"
 fi
 
+# Step 5: Register bot command menu
+printf '  Setting bot menu...'
+menu_response="$(curl -s --max-time 10 \
+    -X POST "${API_BASE}${BOT_TOKEN}/setMyCommands" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "commands": [
+            {"command": "s", "description": "Interactive session list"},
+            {"command": "v", "description": "View session output"},
+            {"command": "a", "description": "Approve (send y)"},
+            {"command": "d", "description": "Deny (send n)"},
+            {"command": "send", "description": "Send text to session"},
+            {"command": "run", "description": "Run command in session"},
+            {"command": "help", "description": "Show all commands"}
+        ]
+    }' 2>/dev/null)" || menu_response=""
+menu_ok="$(printf '%s' "$menu_response" | jq -r '.ok' 2>/dev/null)" || menu_ok="false"
+if [ "$menu_ok" = "true" ]; then
+    printf ' done!\n'
+else
+    printf ' skipped (non-critical).\n'
+fi
+
 printf '\n  Setup complete!\n\n'
 printf '  To start the bot daemon:\n'
 printf '    %s/telegram.sh start\n\n' "$(cd "$(dirname "$0")" && pwd)"
 printf '  The daemon enables interactive commands from Telegram\n'
-printf '  (e.g. /status, /view, /approve). Notifications work without it.\n\n'
+printf '  (e.g. /s, /v, /a). Notifications work without it.\n\n'
