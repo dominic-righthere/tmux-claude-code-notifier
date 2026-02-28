@@ -711,6 +711,11 @@ cmd_run_daemon() {
             ]
         }' >/dev/null 2>&1 || true
 
+    # Notify that bot has started
+    local ver=""
+    [ -f "${SCRIPT_DIR}/VERSION" ] && ver=" v$(<"${SCRIPT_DIR}/VERSION")" && ver="${ver%$'\n'}"
+    send_message "Bot started${ver}"
+
     local offset=0
 
     # Clean shutdown on signals
