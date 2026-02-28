@@ -41,6 +41,44 @@ The installer registers Claude Code [hooks](https://docs.anthropic.com/en/docs/c
 
 `status.sh` runs on a tmux polling interval, reads those files, and renders badge counts + a detail line in your status bar. The dashboard (`dashboard.sh`) provides a full overview and lets you jump directly to any session window.
 
+## Telegram Bot (Optional)
+
+Control Claude Code sessions from your phone — get notifications, view output, approve permissions.
+
+### Setup
+
+```sh
+./telegram-setup.sh
+```
+
+The wizard walks you through creating a bot via BotFather and linking your Telegram account.
+
+### Start the bot daemon
+
+```sh
+./telegram.sh start    # background daemon
+./telegram.sh stop     # stop daemon
+./telegram.sh status   # check if running
+./telegram.sh run      # foreground (debug)
+```
+
+Notifications (permission requests, task finished) are sent automatically without the daemon. The daemon enables interactive commands.
+
+### Commands
+
+| Command | Shortcut | Action |
+|---------|----------|--------|
+| `/help` | | Show available commands |
+| `/status` | `/s` | All sessions with status icons |
+| `/sessions` | `/ls` | Numbered session list |
+| `/view <n>` | `/v <n>` | Last 50 lines of pane output |
+| `/send <n> <msg>` | | Send prompt text to Claude pane |
+| `/approve <n>` | `/a <n>` | Send `y` + Enter to pane |
+| `/deny <n>` | `/d <n>` | Send `n` + Enter to pane |
+| `/run <n> <cmd>` | | Run command in adjacent tmux window |
+
+Permission request notifications include inline **Approve** / **Deny** / **View** buttons.
+
 ## Uninstall
 
 ```sh

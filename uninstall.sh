@@ -40,7 +40,19 @@ else
     printf '  No tmux config block found, skipping.\n'
 fi
 
-# 3. Remove data directory
+# 3. Stop Telegram bot daemon if running
+PID_FILE="${DATA_DIR}/telegram.pid"
+if [ -f "$PID_FILE" ]; then
+    pid="$(<"$PID_FILE")"
+    if kill -0 "$pid" 2>/dev/null; then
+        printf '  Stopping Telegram bot daemon (PID %s)...\n' "$pid"
+        kill "$pid" 2>/dev/null || true
+        sleep 1
+        kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+    fi
+fi
+
+# 4. Remove data directory
 if [ -d "$DATA_DIR" ]; then
     printf '  Removing data directory...\n'
     rm -rf "$DATA_DIR"

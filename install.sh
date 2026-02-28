@@ -34,6 +34,11 @@ chmod +x "${SCRIPT_DIR}/status.sh"
 chmod +x "${SCRIPT_DIR}/clear.sh"
 chmod +x "${SCRIPT_DIR}/jump.sh"
 chmod +x "${SCRIPT_DIR}/cycle.sh"
+chmod +x "${SCRIPT_DIR}/scan.sh"
+chmod +x "${SCRIPT_DIR}/popup.sh"
+chmod +x "${SCRIPT_DIR}/telegram-setup.sh"
+chmod +x "${SCRIPT_DIR}/telegram-send.sh"
+chmod +x "${SCRIPT_DIR}/telegram.sh"
 
 # 3. Merge hooks into ~/.claude/settings.json
 printf '  Configuring Claude Code hooks...\n'
@@ -74,7 +79,7 @@ fi
 NOTIFIER_BLOCK="${MARKER_BEGIN}
 set-hook -g after-select-window 'run-shell \"${SCRIPT_DIR}/clear.sh #{session_name} #{window_index}\"'
 set -g @rose_pine_status_right_append_section '#(${SCRIPT_DIR}/status.sh)'
-bind-key N display-popup -E -w 80% -h 60% '${SCRIPT_DIR}/dashboard.sh'
+bind-key N run-shell '${SCRIPT_DIR}/popup.sh'
 bind-key J run-shell '${SCRIPT_DIR}/jump.sh'
 bind-key K run-shell '${SCRIPT_DIR}/cycle.sh'
 ${MARKER_END}"
@@ -84,7 +89,7 @@ CONTENT="$(<"$TMUX_CONF")"
 TPM_LINE="run '~/.tmux/plugins/tpm/tpm'"
 if [[ "$CONTENT" == *"$TPM_LINE"* ]]; then
     NL=$'\n'
-    CONTENT="${CONTENT/"$TPM_LINE"/"${NOTIFIER_BLOCK}${NL}${NL}${TPM_LINE}"}"
+    CONTENT="${CONTENT/"$TPM_LINE"/${NOTIFIER_BLOCK}${NL}${NL}${TPM_LINE}}"
     printf '%s\n' "$CONTENT" > "$TMUX_CONF"
 else
     # Strip trailing newlines and append
@@ -101,3 +106,5 @@ printf '    2. Restart Claude Code (hooks load at startup)\n'
 printf '    3. prefix + N to open the notification dashboard\n'
 printf '    4. prefix + J to jump to the most recent notification\n'
 printf '    5. prefix + K to cycle through Claude Code sessions\n\n'
+printf '  Optional — Telegram notifications:\n'
+printf '    %s/telegram-setup.sh\n\n' "$SCRIPT_DIR"

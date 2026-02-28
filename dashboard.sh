@@ -3,6 +3,7 @@
 # Shows working/waiting/finished Claude sessions, allows direct window switching
 set -uo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DATA_DIR="${HOME}/.local/share/claude-notifier"
 ACTIVE_DIR="${DATA_DIR}/active"
 NOTIF_DIR="${DATA_DIR}/notifications"
@@ -58,12 +59,19 @@ declare -a DISPLAY_ORDER=()
 DISPLAY_COUNT=0  # Number of entries in display order
 CURSOR=1  # Currently selected visual position
 
+# Search state
+SEARCH_QUERY=""
+SEARCH_MODE=0
+DETAIL_MODE=0
+
 # Column width tracking for alignment
 MAX_SESSWIN=0
 MAX_WNAME=0
 
 # Key mapping: 1-9 for entries 1-9, a-z for entries 10-35
 KEYS="123456789abcdefghijklmnopqrstuvwxyz"
+
+to_lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
 pos_to_key() {
     local pos="$1"
@@ -82,10 +90,23 @@ key_to_pos() {
 build_display_order() {
     DISPLAY_ORDER=()
     DISPLAY_COUNT=0
-    local cat
+    local cat query_lower
+    query_lower="$(to_lower "$SEARCH_QUERY")"
     for cat in working waiting finished idle; do
         for i in $(seq 1 "$INDEX"); do
             [ "${E_CAT[$i]}" = "$cat" ] || continue
+            # Apply search filter
+            if [ -n "$query_lower" ]; then
+                local match=0
+                local sess_lower wname_lower msg_lower
+                sess_lower="$(to_lower "${E_SESSION[$i]}")"
+                wname_lower="$(to_lower "${E_WNAME[$i]}")"
+                msg_lower="$(to_lower "${E_MSG[$i]}")"
+                [[ "$sess_lower" == *"$query_lower"* ]] && match=1
+                [[ "$wname_lower" == *"$query_lower"* ]] && match=1
+                [[ "$msg_lower" == *"$query_lower"* ]] && match=1
+                [ "$match" -eq 0 ] && continue
+            fi
             DISPLAY_COUNT=$(( DISPLAY_COUNT + 1 ))
             DISPLAY_ORDER[$DISPLAY_COUNT]=$i
         done
@@ -225,16 +246,16 @@ render_entry() {
 
     if [ "$remain" -ge 12 ]; then
         show_msg=1
-        msg_w=$remain
+        msg_w=$(( remain - 2 ))
     fi
     if [ "$remain" -ge 24 ]; then
         show_wname=1
         wname_w=10
-        msg_w=$(( remain - 12 ))
+        msg_w=$(( remain - 14 ))
     fi
     if [ "$remain" -ge 34 ]; then
         show_status=1
-        msg_w=$(( remain - 22 ))
+        msg_w=$(( remain - 24 ))
     fi
 
     # Truncate as needed
@@ -260,6 +281,41 @@ render_entry() {
     printf '\n'
 }
 
+render_detail() {
+    local cols
+    cols=$(tput cols 2>/dev/null || echo 80)
+    local i="${DISPLAY_ORDER[$CURSOR]}"
+    local cat="${E_CAT[$i]}"
+    local clr icon
+    clr="$(color_for "$cat")"
+    icon="$(icon_for "$cat")"
+
+    printf '  \033[1mEntry Detail\033[0m\n\n'
+    printf '  \033[90m%-12s\033[0m %s\n' "Session" "${E_SESSION[$i]}"
+    printf '  \033[90m%-12s\033[0m %s\n' "Window" "${E_WINDOW[$i]}"
+    printf '  \033[90m%-12s\033[0m %s\n' "Window Name" "${E_WNAME[$i]}"
+    printf '  \033[90m%-12s\033[0m \033[%sm%s %s\033[0m\n' "Status" "$clr" "$icon" "$cat"
+    printf '  \033[90m%-12s\033[0m %s\n' "Time" "$(relative_time "${E_TS[$i]}") ago"
+
+    # Word-wrap message to fit terminal
+    printf '  \033[90m%-12s\033[0m ' "Message"
+    local msg="${E_MSG[$i]}"
+    local wrap_w=$(( cols - 16 ))
+    [ "$wrap_w" -lt 20 ] && wrap_w=20
+    local pos=0
+    while [ "$pos" -lt "${#msg}" ]; do
+        local chunk="${msg:$pos:$wrap_w}"
+        if [ "$pos" -gt 0 ]; then
+            printf '  %14s' ""
+        fi
+        printf '%s\n' "$chunk"
+        pos=$(( pos + wrap_w ))
+    done
+    [ -z "$msg" ] && printf '\n'
+
+    printf '\n  [Enter] jump  [i/Esc] back  [q] quit\n'
+}
+
 section_label() {
     case "$1" in
         working)  printf 'WORKING' ;;
@@ -273,23 +329,26 @@ render() {
     local cols
     cols=$(tput cols 2>/dev/null || echo 80)
     clear
-    printf '\n'
 
-    # Header scales with width
-    if [ "$cols" -ge 100 ]; then
-        printf '              Claude Code Sessions\n'
-        printf '  ────────────────────────────────────────────────────────────────────\n'
-    elif [ "$cols" -ge 60 ]; then
-        printf '        Claude Code Sessions\n'
-        printf '  ──────────────────────────────────────────────\n'
-    else
-        printf '  Claude Sessions\n'
-        printf '  ───────────────\n'
+    if [ "$DETAIL_MODE" -eq 1 ] && [ "$DISPLAY_COUNT" -gt 0 ]; then
+        render_detail
+        return
     fi
 
+    # Compact single-line header
+    printf '  \033[1mClaude Code Sessions\033[0m\n'
+
     if [ "$DISPLAY_COUNT" -eq 0 ]; then
-        printf '\n    No active sessions.\n\n'
-        printf '  [q] quit\n'
+        if [ -n "$SEARCH_QUERY" ]; then
+            printf '\n    No matching sessions.\n'
+        else
+            printf '\n    No active sessions.\n'
+        fi
+        if [ "$SEARCH_MODE" -eq 1 ]; then
+            printf '\n  /%s_\n' "$SEARCH_QUERY"
+        else
+            printf '\n  [r] refresh  [/] search  [q] quit\n'
+        fi
         return
     fi
 
@@ -300,15 +359,20 @@ render() {
         cat="${E_CAT[$i]}"
         if [ "$cat" != "$last_cat" ]; then
             label="$(section_label "$cat")"
-            printf '\n  \033[1m%s\033[0m\n' "$label"
+            printf '  \033[1m%s\033[0m\n' "$label"
             last_cat="$cat"
         fi
         render_entry "$pos" "$i" "$cat" "$cols"
     done
 
-    local max_key
-    max_key="$(pos_to_key "$DISPLAY_COUNT")"
-    printf '\n  [↑↓/jk] navigate  [Enter] select  [1-%s] goto  [r] refresh  [c] clear  [q] quit\n' "$max_key"
+    # Footer
+    if [ "$SEARCH_MODE" -eq 1 ]; then
+        printf '\n  /%s_\n' "$SEARCH_QUERY"
+    else
+        local max_key
+        max_key="$(pos_to_key "$DISPLAY_COUNT")"
+        printf '\n  [jk] nav  [Enter] select  [/] search  [r] refresh  [c] clear  [q] quit\n'
+    fi
 }
 
 goto_entry() {
@@ -330,10 +394,16 @@ goto_entry() {
     fi
 }
 
+clamp_cursor() {
+    [ "$CURSOR" -gt "$DISPLAY_COUNT" ] && CURSOR=$DISPLAY_COUNT
+    [ "$CURSOR" -lt 1 ] && CURSOR=1
+}
+
+# Auto-scan for untracked Claude Code sessions
+"${SCRIPT_DIR}/scan.sh" >/dev/null 2>&1 || true
+
 load_entries
-# Ensure cursor is valid
-[ "$CURSOR" -gt "$DISPLAY_COUNT" ] && CURSOR=$DISPLAY_COUNT
-[ "$CURSOR" -lt 1 ] && CURSOR=1
+clamp_cursor
 render
 
 # Ensure we're reading from the terminal (fixes tmux popup issues)
@@ -354,9 +424,80 @@ move_cursor() {
 while true; do
     read -rsn1 key 2>/dev/null || key=""
 
+    # Search mode key handling
+    if [ "$SEARCH_MODE" -eq 1 ]; then
+        case "$key" in
+            $'\x1b')  # Escape — exit search or handle arrow keys
+                read -rsn2 -t 0.1 seq 2>/dev/null || seq=""
+                case "$seq" in
+                    '[A') move_cursor -1 ;;
+                    '[B') move_cursor 1 ;;
+                    *)  # Plain Escape — clear search
+                        SEARCH_MODE=0
+                        SEARCH_QUERY=""
+                        build_display_order
+                        clamp_cursor
+                        render
+                        ;;
+                esac
+                ;;
+            "")  # Enter — select current entry
+                goto_entry "$CURSOR"
+                ;;
+            $'\x7f'|$'\b')  # Backspace/Delete
+                if [ -n "$SEARCH_QUERY" ]; then
+                    SEARCH_QUERY="${SEARCH_QUERY%?}"
+                fi
+                build_display_order
+                clamp_cursor
+                render
+                ;;
+            j) move_cursor 1 ;;
+            k) move_cursor -1 ;;
+            *)  # Printable character — append to query
+                if [[ "$key" =~ [[:print:]] ]]; then
+                    SEARCH_QUERY="${SEARCH_QUERY}${key}"
+                    build_display_order
+                    CURSOR=1
+                    clamp_cursor
+                    render
+                fi
+                ;;
+        esac
+        continue
+    fi
+
+    # Detail mode key handling
+    if [ "$DETAIL_MODE" -eq 1 ]; then
+        case "$key" in
+            q|Q)
+                exit 0
+                ;;
+            "")  # Enter — jump to entry
+                goto_entry "$CURSOR"
+                ;;
+            i)
+                DETAIL_MODE=0
+                render
+                ;;
+            $'\x1b')  # Escape — back to list
+                read -rsn2 -t 0.1 _ 2>/dev/null || true
+                DETAIL_MODE=0
+                render
+                ;;
+        esac
+        continue
+    fi
+
+    # Normal mode key handling
     case "$key" in
         q|Q)
             exit 0
+            ;;
+        /)  # Enter search mode
+            SEARCH_MODE=1
+            SEARCH_QUERY=""
+            render
             ;;
         $'\x1b')  # Escape sequence (arrow keys)
             read -rsn2 -t 0.1 seq 2>/dev/null || seq=""
@@ -376,18 +517,22 @@ while true; do
             ;;
         r|R)
             load_entries
-            [ "$CURSOR" -gt "$DISPLAY_COUNT" ] && CURSOR=$DISPLAY_COUNT
-            [ "$CURSOR" -lt 1 ] && CURSOR=1
+            clamp_cursor
             render
             ;;
         c|C)
             rm -f "$NOTIF_DIR"/*
             load_entries
-            [ "$CURSOR" -gt "$DISPLAY_COUNT" ] && CURSOR=$DISPLAY_COUNT
-            [ "$CURSOR" -lt 1 ] && CURSOR=1
+            clamp_cursor
             render
             ;;
-        [1-9a-bd-il-ps-z])  # Direct key shortcuts (excluding c,j,k,q,r)
+        i)  # Detail view
+            if [ "$DISPLAY_COUNT" -gt 0 ]; then
+                DETAIL_MODE=1
+                render
+            fi
+            ;;
+        [1-9a-bd-hl-ps-z])  # Direct key shortcuts (excluding c,i,j,k,q,r)
             pos="$(key_to_pos "$key" 2>/dev/null)" || continue
             [ -n "$pos" ] && [ "$pos" -ge 1 ] && [ "$pos" -le "$DISPLAY_COUNT" ] && goto_entry "$pos"
             ;;

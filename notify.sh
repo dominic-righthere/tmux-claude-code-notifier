@@ -3,6 +3,7 @@
 # Reads hook JSON from stdin, manages files in ~/.local/share/claude-notifier/
 set -uo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DATA_DIR="${HOME}/.local/share/claude-notifier"
 ACTIVE_DIR="${DATA_DIR}/active"
 NOTIF_DIR="${DATA_DIR}/notifications"
@@ -39,9 +40,8 @@ fi
 # Use TMUX_PANE to identify Claude's pane, so we always resolve the correct
 # session/window even when the user is viewing a different window.
 PANE_TARGET="${TMUX_PANE:-%0}"
-SESSION="$(tmux display-message -t "$PANE_TARGET" -p '#{session_name}' 2>/dev/null)" || exit 0
-WINDOW="$(tmux display-message -t "$PANE_TARGET" -p '#{window_index}' 2>/dev/null)" || exit 0
-WINDOW_NAME="$(tmux display-message -t "$PANE_TARGET" -p '#{window_name}' 2>/dev/null)" || exit 0
+_tmux_info="$(tmux display-message -t "$PANE_TARGET" -p '#{session_name}|#{window_index}|#{window_name}' 2>/dev/null)" || exit 0
+IFS='|' read -r SESSION WINDOW WINDOW_NAME <<< "$_tmux_info"
 
 [ -z "$SESSION" ] && exit 0
 [ -z "$WINDOW" ] && exit 0
@@ -88,6 +88,7 @@ case "$EVENT" in
         else
             write_file "$NOTIF_DIR" "finished" "Finished"
             printf '\a'
+            "${SCRIPT_DIR}/telegram-send.sh" "finished" "$SESSION" "$WINDOW" "Finished" &
         fi
         ;;
     Notification)
@@ -98,6 +99,7 @@ case "$EVENT" in
         fi
         write_file "$NOTIF_DIR" "waiting" "$MSG"
         printf '\a'
+        "${SCRIPT_DIR}/telegram-send.sh" "waiting" "$SESSION" "$WINDOW" "$MSG" &
         ;;
     PermissionRequest)
         # Permission needed — record as waiting with tool name
@@ -107,6 +109,7 @@ case "$EVENT" in
         fi
         write_file "$NOTIF_DIR" "waiting" "$local_msg"
         printf '\a'
+        "${SCRIPT_DIR}/telegram-send.sh" "waiting" "$SESSION" "$WINDOW" "$local_msg" "$TOOL_NAME" &
         ;;
 esac
 

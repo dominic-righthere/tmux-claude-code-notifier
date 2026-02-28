@@ -355,6 +355,92 @@ else
 fi
 
 # =============================================================================
+# Batched tmux call test
+# =============================================================================
+printf "\n${YELLOW}=== Batched tmux Call Tests ===${NC}\n"
+
+# Test 18: notify.sh uses single pipe-separated tmux call
+run_test
+if grep -q "#{session_name}|#{window_index}|#{window_name}" ./notify.sh; then
+    pass "notify.sh uses batched tmux display-message"
+else
+    fail "notify.sh uses batched tmux display-message" "Expected pipe-separated format string"
+fi
+
+# Test 19: notify.sh does NOT have 3 separate display-message calls
+run_test
+count=$(grep -c "tmux display-message" ./notify.sh)
+# Should be exactly 1 (the batched call) — the refresh-client is not display-message
+if [ "$count" -eq 1 ]; then
+    pass "notify.sh has single tmux display-message call"
+else
+    fail "notify.sh has single tmux display-message call" "Found $count calls, expected 1"
+fi
+
+# =============================================================================
+# Telegram Tests
+# =============================================================================
+printf "\n${YELLOW}=== Telegram Tests ===${NC}\n"
+
+# Test 20: telegram-send.sh exits silently with no config
+run_test
+# Ensure no config exists in test env
+_orig_home="${HOME}"
+export HOME="${TEST_DATA_DIR}/fakehome"
+mkdir -p "${HOME}/.local/share/claude-notifier"
+./telegram-send.sh "finished" "test" "0" "Finished" 2>/dev/null
+exit_code=$?
+export HOME="$_orig_home"
+if [ "$exit_code" -eq 0 ]; then
+    pass "telegram-send.sh exits 0 with no config"
+else
+    fail "telegram-send.sh exits 0 with no config" "Exit code was $exit_code"
+fi
+
+# Test 21: telegram-send.sh exits silently for non-matching event types
+run_test
+export HOME="${TEST_DATA_DIR}/fakehome"
+# Create a fake config so it doesn't exit at the config check
+printf 'BOT_TOKEN=fake\nCHAT_ID=123\n' > "${HOME}/.local/share/claude-notifier/telegram.conf"
+chmod 600 "${HOME}/.local/share/claude-notifier/telegram.conf"
+./telegram-send.sh "working" "test" "0" "Working..." 2>/dev/null
+exit_code=$?
+export HOME="$_orig_home"
+if [ "$exit_code" -eq 0 ]; then
+    pass "telegram-send.sh exits 0 for non-matching event type"
+else
+    fail "telegram-send.sh exits 0 for non-matching event type" "Exit code was $exit_code"
+fi
+
+# Test 22: telegram.sh shows usage without arguments
+run_test
+output=$(./telegram.sh 2>&1) || true
+if [[ "$output" == *"start|stop|status|run"* ]]; then
+    pass "telegram.sh shows usage"
+else
+    fail "telegram.sh shows usage" "Got: $output"
+fi
+
+# Test 23: jump.sh skips current window logic exists
+run_test
+if grep -q 'CURRENT=' ./jump.sh && grep -q 'CANDIDATES' ./jump.sh; then
+    pass "jump.sh has current-window skip logic"
+else
+    fail "jump.sh has current-window skip logic" "Missing CURRENT or CANDIDATES"
+fi
+
+# Test 24: popup.sh runs scan before counting
+run_test
+# scan.sh call should appear before the count loop
+scan_line=$(grep -n 'scan.sh' ./popup.sh | head -1 | cut -d: -f1)
+count_line=$(grep -n 'for f in' ./popup.sh | head -1 | cut -d: -f1)
+if [ -n "$scan_line" ] && [ -n "$count_line" ] && [ "$scan_line" -lt "$count_line" ]; then
+    pass "popup.sh runs scan before counting files"
+else
+    fail "popup.sh runs scan before counting files" "scan_line=$scan_line count_line=$count_line"
+fi
+
+# =============================================================================
 # Summary
 # =============================================================================
 printf "\n${YELLOW}=== Test Summary ===${NC}\n"
