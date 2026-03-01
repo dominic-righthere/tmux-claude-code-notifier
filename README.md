@@ -37,7 +37,7 @@ Restart any running Claude Code sessions so hooks take effect.
 
 ## How It Works
 
-The installer registers Claude Code [hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) for `UserPromptSubmit`, `Stop`, `Notification`, and `PermissionRequest` events. Each hook invokes `notify.sh`, which writes state files to `~/.local/share/claude-notifier/`.
+The installer registers Claude Code [hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) for all 7 lifecycle events (`SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `Stop`, `Notification`, `PermissionRequest`). Each hook invokes `notify.sh`, which writes state files to `~/.local/share/claude-notifier/`.
 
 `status.sh` runs on a tmux polling interval, reads those files, and renders badge counts + a detail line in your status bar. The dashboard (`dashboard.sh`) provides a full overview and lets you jump directly to any session window.
 
@@ -66,18 +66,19 @@ Notifications (permission requests, task finished) are sent automatically withou
 
 ### Commands
 
-| Command | Shortcut | Action |
-|---------|----------|--------|
-| `/help` | | Show available commands |
-| `/status` | `/s` | All sessions with status icons |
-| `/sessions` | `/ls` | Numbered session list |
-| `/view <n>` | `/v <n>` | Last 50 lines of pane output |
-| `/send <n> <msg>` | | Send prompt text to Claude pane |
-| `/approve <n>` | `/a <n>` | Send `y` + Enter to pane |
-| `/deny <n>` | `/d <n>` | Send `n` + Enter to pane |
-| `/run <n> <cmd>` | | Run command in adjacent tmux window |
+| Command | Action |
+|---------|--------|
+| `/s` | Interactive session list with inline buttons |
+| `/v <n>` | View last 200 lines of pane output |
+| `/a <n>` | Approve — send `y` + Enter to pane |
+| `/d <n>` | Deny — send `n` + Enter to pane |
+| `/send <n> <msg>` | Send arbitrary text to pane |
+| `/run <n> <cmd>` | Run command in adjacent tmux window |
+| `/restart [ver]` | Restart all Claude Code sessions (optional version) |
+| `/doctor` | Run diagnostics |
+| `/help` | Show available commands |
 
-Permission request notifications include inline **Approve** / **Deny** / **View** buttons.
+Permission request notifications include inline **Approve** / **Deny** / **View** buttons. When Claude presents numbered options, those appear as individual buttons too (max 4).
 
 ## Uninstall
 

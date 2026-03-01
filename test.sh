@@ -1441,6 +1441,30 @@ else
     fail "notify.sh extracts prompt from UserPromptSubmit"
 fi
 
+# Test 121: Notification handler skips dispatch when waiting exists
+run_test
+if sed -n '/Notification)/,/;;/p' ./notify.sh | grep -q 'skipped (waiting exists)'; then
+    pass "Notification handler skips dispatch when waiting exists"
+else
+    fail "Notification handler skips dispatch when waiting exists"
+fi
+
+# Test 122: notify.sh dispatches prompt on UserPromptSubmit
+run_test
+if sed -n '/UserPromptSubmit)/,/;;/p' ./notify.sh | grep -q 'dispatch.sh.*prompt'; then
+    pass "notify.sh dispatches prompt on UserPromptSubmit"
+else
+    fail "notify.sh dispatches prompt on UserPromptSubmit"
+fi
+
+# Test 123: telegram-send.sh handles prompt type
+run_test
+if grep -q 'waiting|finished|prompt' ./telegram-send.sh; then
+    pass "telegram-send.sh handles prompt type"
+else
+    fail "telegram-send.sh handles prompt type"
+fi
+
 # =============================================================================
 # Summary
 # =============================================================================

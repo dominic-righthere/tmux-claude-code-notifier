@@ -30,7 +30,7 @@ TOOL_NAME="${5:-}"
 
 # Only send for waiting and finished events
 case "$TYPE" in
-    waiting|finished) ;;
+    waiting|finished|prompt) ;;
     *) exit 0 ;;
 esac
 
@@ -47,27 +47,30 @@ project_name=""
 pane_path="$(tmux display-message -t "${SESSION}:${WINDOW}" -p '#{pane_current_path}' 2>/dev/null)" || pane_path=""
 [ -n "$pane_path" ] && project_name="$(basename "$pane_path")"
 
-# Capture pane context (deep scrollback for activity extraction)
-sleep 0.3  # ensure prompt is rendered
+# Capture pane context (not needed for prompt type — we have the text already)
 raw_context=""
-pane_width="$(tmux display-message -t "${SESSION}:${WINDOW}" -p '#{pane_width}' 2>/dev/null)" || pane_width="120"
-if raw_context="$(tmux capture-pane -t "${SESSION}:${WINDOW}" -J -p -S -200 2>/dev/null)"; then
-    raw_context="$(strip_ansi "$raw_context")"
-    # Trim leading/trailing blank lines
-    raw_context="$(printf '%s' "$raw_context" | sed '/./,$!d')"
-    while [[ "$raw_context" =~ [[:space:]]*$'\n'$ ]]; do
-        raw_context="${raw_context%$'\n'}"
-        raw_context="${raw_context%"${raw_context##*[![:space:]]}"}"
-    done
-fi
-
-# Detect mode from raw_context
+pane_width="120"
 mode_label=""
-if [ -n "$raw_context" ]; then
-    if printf '%s' "$raw_context" | grep -qi 'plan mode'; then
-        mode_label="⏸ plan mode"
-    elif printf '%s' "$raw_context" | grep -qi 'auto-accept\|accept edits'; then
-        mode_label="⏵⏵ auto-accept"
+if [ "$TYPE" != "prompt" ]; then
+    sleep 0.3  # ensure prompt is rendered
+    pane_width="$(tmux display-message -t "${SESSION}:${WINDOW}" -p '#{pane_width}' 2>/dev/null)" || pane_width="120"
+    if raw_context="$(tmux capture-pane -t "${SESSION}:${WINDOW}" -J -p -S -200 2>/dev/null)"; then
+        raw_context="$(strip_ansi "$raw_context")"
+        # Trim leading/trailing blank lines
+        raw_context="$(printf '%s' "$raw_context" | sed '/./,$!d')"
+        while [[ "$raw_context" =~ [[:space:]]*$'\n'$ ]]; do
+            raw_context="${raw_context%$'\n'}"
+            raw_context="${raw_context%"${raw_context##*[![:space:]]}"}"
+        done
+    fi
+
+    # Detect mode from raw_context
+    if [ -n "$raw_context" ]; then
+        if printf '%s' "$raw_context" | grep -qi 'plan mode'; then
+            mode_label="⏸ plan mode"
+        elif printf '%s' "$raw_context" | grep -qi 'auto-accept\|accept edits'; then
+            mode_label="⏵⏵ auto-accept"
+        fi
     fi
 fi
 
@@ -76,7 +79,9 @@ fi
 # Build message header: type badge, session, project, tool, mode
 # Sets: header
 build_header() {
-    if [ "$TYPE" = "waiting" ]; then
+    if [ "$TYPE" = "prompt" ]; then
+        header="▶ <b>Working</b>"
+    elif [ "$TYPE" = "waiting" ]; then
         if [ -n "$TOOL_NAME" ]; then
             header="⏳ <b>Permission Request</b>"
         else
@@ -107,6 +112,21 @@ build_header() {
 # Sets: body
 build_body() {
     body=""
+
+    # For prompt type, use the message text directly (no pane capture needed)
+    if [ "$TYPE" = "prompt" ]; then
+        if [ -n "$MESSAGE" ]; then
+            local wrapped
+            wrapped="$(printf '%s' "$MESSAGE" | wrap_long_lines 50)"
+            local prompt_escaped
+            prompt_escaped="$(html_escape "$wrapped")"
+            body="
+
+${prompt_escaped}"
+        fi
+        return
+    fi
+
     [ -z "$raw_context" ] && return
 
     # Reflow and convert tables (but do NOT wrap yet — wrapping inflates line count)

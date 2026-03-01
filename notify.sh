@@ -80,6 +80,10 @@ case "$EVENT" in
         if [ "${#USER_PROMPT}" -gt 500 ]; then
             USER_PROMPT="${USER_PROMPT:0:500}"
         fi
+        # Dispatch prompt to Telegram so user sees what they asked
+        if [ -n "$USER_PROMPT" ]; then
+            "${SCRIPT_DIR}/dispatch.sh" "prompt" "$SESSION" "$WINDOW" "$USER_PROMPT" &
+        fi
         log_event src hook event UserPromptSubmit session "$SESSION" window "$WINDOW" text "$USER_PROMPT"
         ;;
     PreToolUse)
@@ -110,10 +114,17 @@ case "$EVENT" in
         if [ "${#MSG}" -gt 40 ]; then
             MSG="${MSG:0:37}..."
         fi
-        write_file "$NOTIF_DIR" "waiting" "$MSG"
-        printf '\a'
-        "${SCRIPT_DIR}/dispatch.sh" "waiting" "$SESSION" "$WINDOW" "$MSG" &
-        log_event src hook event Notification session "$SESSION" window "$WINDOW" message "$MSG"
+        # Don't overwrite a waiting notification (PermissionRequest already has buttons)
+        EXISTING_TYPE="$(read_state_field "${NOTIF_DIR}/${KEY}" "TYPE" 2>/dev/null)" || EXISTING_TYPE=""
+        if [ "$EXISTING_TYPE" = "waiting" ]; then
+            printf '\a'
+            log_event src hook event Notification session "$SESSION" window "$WINDOW" message "skipped (waiting exists)"
+        else
+            write_file "$NOTIF_DIR" "waiting" "$MSG"
+            printf '\a'
+            "${SCRIPT_DIR}/dispatch.sh" "waiting" "$SESSION" "$WINDOW" "$MSG" &
+            log_event src hook event Notification session "$SESSION" window "$WINDOW" message "$MSG"
+        fi
         ;;
     PermissionRequest)
         # Permission needed — record as waiting with tool name
