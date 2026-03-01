@@ -34,23 +34,16 @@ esac
 
 API_BASE="https://api.telegram.org/bot${BOT_TOKEN}"
 
-# Message deduplication: store message_id per session key
-MSG_ID_DIR="${HOME}/.local/share/claude-notifier/telegram_msg_ids"
-mkdir -p "$MSG_ID_DIR"
-SAFE_SESSION="$(sanitize_key "$SESSION")"
-MSG_KEY="${SAFE_SESSION}_${WINDOW}"
-
 # Get project name from pane current path
 project_name=""
 pane_path="$(tmux display-message -t "${SESSION}:${WINDOW}" -p '#{pane_current_path}' 2>/dev/null)" || pane_path=""
 [ -n "$pane_path" ] && project_name="$(basename "$pane_path")"
 
-# Capture pane context (last ~15 lines) for inline preview + mode/task detection
+# Capture pane context (deep scrollback for activity extraction)
 sleep 0.3  # ensure prompt is rendered
 raw_context=""
-pane_context=""
-if raw_context="$(tmux capture-pane -t "${SESSION}:${WINDOW}" -J -p -S -15 2>/dev/null)"; then
-    # Strip ANSI escape codes
+pane_width="$(tmux display-message -t "${SESSION}:${WINDOW}" -p '#{pane_width}' 2>/dev/null)" || pane_width="120"
+if raw_context="$(tmux capture-pane -t "${SESSION}:${WINDOW}" -J -p -S -200 2>/dev/null)"; then
     raw_context="$(strip_ansi "$raw_context")"
     # Trim leading/trailing blank lines
     raw_context="$(printf '%s' "$raw_context" | sed '/./,$!d')"
@@ -58,9 +51,6 @@ if raw_context="$(tmux capture-pane -t "${SESSION}:${WINDOW}" -J -p -S -15 2>/de
         raw_context="${raw_context%$'\n'}"
         raw_context="${raw_context%"${raw_context##*[![:space:]]}"}"
     done
-    if [ -n "$raw_context" ]; then
-        pane_context="$(html_escape "$raw_context")"
-    fi
 fi
 
 # Detect mode from raw_context
@@ -100,25 +90,63 @@ fi
 # Convert literal \n to real newlines
 text="$(printf '%b' "$text")"
 
-# Build preview + expandable context
-if [ -n "$pane_context" ]; then
-    # Extract 3 meaningful lines as compact preview
-    preview_raw="$(extract_preview "$raw_context" 3)"
-    preview_escaped="$(html_escape "$preview_raw")"
+# Extract structured content from raw context
+if [ -n "$raw_context" ]; then
+    # Apply formatting pipeline
+    formatted="$(printf '%s' "$raw_context" | reflow_for_telegram "$pane_width" | convert_tables_to_bullets | wrap_long_lines 50)"
 
-    # Respect Telegram's 4096 char limit
-    header_len="${#text}"
-    max_context=$(( 4096 - header_len - 100 ))  # reserve for tags + margin
-    if [ "$max_context" -gt 100 ]; then
-        if [ "${#pane_context}" -gt "$max_context" ]; then
-            pane_context="...${pane_context:$((${#pane_context} - max_context))}"
-        fi
+    # Extract prompt text (what Claude is asking/saying)
+    prompt_text="$(extract_prompt_text "$formatted" 8)"
+    prompt_escaped=""
+    if [ -n "$prompt_text" ]; then
+        prompt_escaped="$(html_escape "$prompt_text")"
+    fi
+
+    # Extract activity log (tool calls since last user input)
+    activity="$(extract_activity_log "$raw_context" 15)"
+    activity_escaped=""
+    if [ -n "$activity" ]; then
+        activity_escaped="$(html_escape "$activity")"
+    fi
+
+    # Build the message body
+    # 1. Prompt text as visible preview
+    if [ -n "$prompt_escaped" ]; then
         text="${text}
 
-${preview_escaped}
+${prompt_escaped}"
+    fi
+
+    # 2. Activity log or raw fallback in expandable blockquote
+    if [ -n "$activity_escaped" ]; then
+        # Structured activity log
+        header_len="${#text}"
+        max_activity=$(( 4096 - header_len - 200 ))
+        if [ "$max_activity" -gt 100 ] && [ "${#activity_escaped}" -le "$max_activity" ]; then
+            text="${text}
+
+<blockquote expandable>Activity:
+${activity_escaped}</blockquote>"
+        fi
+    else
+        # Fallback: raw context in expandable blockquote (like before)
+        pane_context="$(html_escape "$formatted")"
+        header_len="${#text}"
+        max_context=$(( 4096 - header_len - 100 ))
+        if [ "$max_context" -gt 100 ]; then
+            if [ "${#pane_context}" -gt "$max_context" ]; then
+                pane_context="...${pane_context:$((${#pane_context} - max_context))}"
+            fi
+            text="${text}
 
 <blockquote expandable>${pane_context}</blockquote>"
+        fi
     fi
+fi
+
+# Enforce Telegram 4096 char limit
+if [ "${#text}" -gt 4096 ]; then
+    text="${text:0:4093}..."
 fi
 
 # Build inline keyboard — parse numbered options for permission requests
@@ -172,52 +200,17 @@ else
     }')"
 fi
 
-# Try to edit existing message for this session, fall back to sending new one
-send_new() {
-    local response
-    response="$(curl -s --max-time 10 \
-        -X POST "${API_BASE}/sendMessage" \
-        -H "Content-Type: application/json" \
-        -d "$(jq -n \
-            --arg chat "$CHAT_ID" \
-            --arg text "$text" \
-            --argjson keyboard "$keyboard" \
-            '{
-                chat_id: ($chat | tonumber),
-                text: $text,
-                parse_mode: "HTML",
-                reply_markup: $keyboard
-            }')" 2>/dev/null)" || return 0
-    # Store message_id for future edits
-    local msg_id
-    msg_id="$(printf '%s' "$response" | jq -r '.result.message_id // empty' 2>/dev/null)"
-    [ -n "$msg_id" ] && printf '%s' "$msg_id" > "${MSG_ID_DIR}/${MSG_KEY}"
-}
-
-prev_msg_id=""
-[ -f "${MSG_ID_DIR}/${MSG_KEY}" ] && prev_msg_id="$(<"${MSG_ID_DIR}/${MSG_KEY}")"
-
-if [ -n "$prev_msg_id" ]; then
-    # Try editing the previous message
-    edit_ok="$(curl -s --max-time 10 \
-        -X POST "${API_BASE}/editMessageText" \
-        -H "Content-Type: application/json" \
-        -d "$(jq -n \
-            --arg chat "$CHAT_ID" \
-            --arg msg_id "$prev_msg_id" \
-            --arg text "$text" \
-            --argjson keyboard "$keyboard" \
-            '{
-                chat_id: ($chat | tonumber),
-                message_id: ($msg_id | tonumber),
-                text: $text,
-                parse_mode: "HTML",
-                reply_markup: $keyboard
-            }')" 2>/dev/null | jq -r '.ok // empty' 2>/dev/null)" || edit_ok=""
-    if [ "$edit_ok" != "true" ]; then
-        # Edit failed (message too old, deleted, etc.) — send new
-        send_new
-    fi
-else
-    send_new
-fi
+# Send notification
+curl -s --max-time 10 \
+    -X POST "${API_BASE}/sendMessage" \
+    -H "Content-Type: application/json" \
+    -d "$(jq -n \
+        --arg chat "$CHAT_ID" \
+        --arg text "$text" \
+        --argjson keyboard "$keyboard" \
+        '{
+            chat_id: ($chat | tonumber),
+            text: $text,
+            parse_mode: "HTML",
+            reply_markup: $keyboard
+        }')" >/dev/null 2>&1 || true

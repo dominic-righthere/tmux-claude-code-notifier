@@ -92,21 +92,40 @@ if [ -n "$INSTALL_VERSION" ]; then
     fi
 fi
 
-# Phase 1: Send Ctrl+C to dismiss any active prompts, then /exit
+# Phase 1: Gracefully exit each pane — wait for prompt before sending /exit
+send_exit_to_pane() {
+    local pane="$1" sess="$2" win="$3"
+    local max_wait=5 elapsed=0
+
+    # Send Escape + Ctrl+C to dismiss any active dialog
+    tmux send-keys -t "$pane" Escape 2>/dev/null || true
+    tmux send-keys -t "$pane" C-c 2>/dev/null || true
+
+    # Poll for the ❯ prompt (up to max_wait seconds)
+    while [ "$elapsed" -lt "$max_wait" ]; do
+        sleep 0.5
+        elapsed=$((elapsed + 1))
+        local content
+        content="$(tmux capture-pane -t "$pane" -p -S -3 2>/dev/null)" || continue
+        if printf '%s' "$content" | grep -q '❯'; then
+            # Prompt visible — send /exit
+            tmux send-keys -t "$pane" "/exit" Enter 2>/dev/null || true
+            printf '  Sent /exit to %s:%s\n' "$sess" "$win"
+            return
+        fi
+    done
+
+    # Prompt never appeared — retry Ctrl+C and send /exit anyway
+    tmux send-keys -t "$pane" C-c 2>/dev/null || true
+    sleep 0.3
+    tmux send-keys -t "$pane" "/exit" Enter 2>/dev/null || true
+    printf '  Sent /exit to %s:%s (prompt not detected)\n' "$sess" "$win"
+}
+
 printf '\nSending /exit to all sessions...\n'
 for entry in "${PANES[@]}"; do
     IFS='|' read -r sess win pane <<< "$entry"
-    # Ctrl+C to dismiss any active dialog (permission prompts, option selects)
-    tmux send-keys -t "$pane" C-c 2>/dev/null || true
-done
-
-# Brief pause for Ctrl+C to take effect
-sleep 0.5
-
-for entry in "${PANES[@]}"; do
-    IFS='|' read -r sess win pane <<< "$entry"
-    tmux send-keys -t "$pane" "/exit" Enter 2>/dev/null || true
-    printf '  Sent /exit to %s:%s\n' "$sess" "$win"
+    send_exit_to_pane "$pane" "$sess" "$win"
 done
 
 # Phase 2: Poll until panes are no longer running Claude Code

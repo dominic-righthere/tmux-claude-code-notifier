@@ -120,6 +120,18 @@ if [ -f "${SCRIPT_DIR}/VERSION" ]; then
     printf '  Recorded version %s\n' "$(<"${SCRIPT_DIR}/VERSION")"
 fi
 
+# 7. Restart Telegram bot if it's currently running (picks up new code)
+if [ -f "${DATA_DIR}/telegram.pid" ]; then
+    old_pid="$(<"${DATA_DIR}/telegram.pid")"
+    if kill -0 "$old_pid" 2>/dev/null; then
+        printf '  Restarting Telegram bot...\n'
+        "${SCRIPT_DIR}/telegram.sh" stop
+        "${SCRIPT_DIR}/telegram.sh" start
+    else
+        rm -f "${DATA_DIR}/telegram.pid"
+    fi
+fi
+
 printf '\n  Installation complete!\n\n'
 printf '  Next steps:\n'
 printf '    1. tmux source ~/.tmux.conf\n'

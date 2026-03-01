@@ -631,24 +631,24 @@ else
 fi
 
 # =============================================================================
-# Telegram Dedup Tests
+# Telegram Send Tests
 # =============================================================================
-printf "\n${YELLOW}=== Telegram Dedup Tests ===${NC}\n"
+printf "\n${YELLOW}=== Telegram Send Tests ===${NC}\n"
 
-# Test 41: telegram-send.sh has editMessageText support
+# Test 41: telegram-send.sh does NOT use editMessageText (dedup removed)
 run_test
-if grep -q 'editMessageText' ./telegram-send.sh; then
-    pass "telegram-send.sh supports editMessageText"
+if ! grep -q 'editMessageText' ./telegram-send.sh; then
+    pass "telegram-send.sh has no editMessageText (dedup removed)"
 else
-    fail "telegram-send.sh supports editMessageText"
+    fail "telegram-send.sh has no editMessageText (dedup removed)"
 fi
 
-# Test 42: telegram-send.sh creates msg_id directory
+# Test 42: telegram-send.sh uses sendMessage directly
 run_test
-if grep -q 'telegram_msg_ids' ./telegram-send.sh; then
-    pass "telegram-send.sh uses message ID tracking directory"
+if grep -q 'sendMessage' ./telegram-send.sh; then
+    pass "telegram-send.sh uses sendMessage"
 else
-    fail "telegram-send.sh uses message ID tracking directory"
+    fail "telegram-send.sh uses sendMessage"
 fi
 
 # =============================================================================
@@ -738,12 +738,20 @@ else
     fail "install.sh includes restart.sh"
 fi
 
+# Test 51: restart.sh has prompt-wait logic
+run_test
+if grep -q 'send_exit_to_pane' ./restart.sh && grep -q '❯' ./restart.sh; then
+    pass "restart.sh has prompt-wait before /exit"
+else
+    fail "restart.sh has prompt-wait before /exit"
+fi
+
 # =============================================================================
 # Doctor / Version Tests
 # =============================================================================
 printf "\n${YELLOW}=== Doctor / Version Tests ===${NC}\n"
 
-# Test 51: VERSION file exists and matches semver
+# Test 52: VERSION file exists and matches semver
 run_test
 if [ -f ./VERSION ]; then
     ver="$(<./VERSION)"
@@ -757,7 +765,7 @@ else
     fail "VERSION file exists"
 fi
 
-# Test 52: doctor.sh exists and is executable
+# Test 53: doctor.sh exists and is executable
 run_test
 if [ -x ./doctor.sh ]; then
     pass "doctor.sh is executable"
@@ -765,7 +773,7 @@ else
     fail "doctor.sh is executable"
 fi
 
-# Test 53: doctor.sh --help shows usage
+# Test 54: doctor.sh --help shows usage
 run_test
 output=$(./doctor.sh --help 2>&1)
 if [[ "$output" == *"--quiet"* ]] && [[ "$output" == *"diagnostics"* ]]; then
@@ -774,7 +782,7 @@ else
     fail "doctor.sh --help shows usage" "Got: $output"
 fi
 
-# Test 54: install.sh copies VERSION to installed_version
+# Test 55: install.sh copies VERSION to installed_version
 run_test
 if grep -q 'installed_version' ./install.sh; then
     pass "install.sh records installed version"
@@ -782,7 +790,7 @@ else
     fail "install.sh records installed version"
 fi
 
-# Test 55: doctor.sh checks all 7 hook events
+# Test 56: doctor.sh checks all 7 hook events
 run_test
 hook_count=0
 for hook in SessionStart SessionEnd UserPromptSubmit PreToolUse Stop Notification PermissionRequest; do
@@ -796,7 +804,7 @@ else
     fail "doctor.sh checks all 7 hook events" "Found $hook_count, expected 7"
 fi
 
-# Test 56: doctor.sh --quiet only shows problems
+# Test 57: doctor.sh --quiet only shows problems
 run_test
 output=$(./doctor.sh --quiet 2>&1) || true
 if [[ "$output" != *"PASS"* ]]; then
@@ -805,12 +813,157 @@ else
     fail "doctor.sh --quiet hides PASS lines" "Output contained PASS"
 fi
 
-# Test 57: install.sh makes doctor.sh executable
+# Test 58: install.sh makes doctor.sh executable
 run_test
 if grep -q 'doctor.sh' ./install.sh; then
     pass "install.sh includes doctor.sh"
 else
     fail "install.sh includes doctor.sh"
+fi
+
+# =============================================================================
+# Formatting Pipeline Tests (lib.sh functions)
+# =============================================================================
+printf "\n${YELLOW}=== Formatting Pipeline Tests ===${NC}\n"
+
+# Test 59: trim_blank_lines is in lib.sh (not duplicated in telegram.sh)
+run_test
+if grep -q 'trim_blank_lines()' ./lib.sh && ! grep -q 'trim_blank_lines()' ./telegram.sh; then
+    pass "trim_blank_lines is in lib.sh only"
+else
+    fail "trim_blank_lines is in lib.sh only"
+fi
+
+# Test 60: reflow_for_telegram is in lib.sh (not duplicated in telegram.sh)
+run_test
+if grep -q 'reflow_for_telegram()' ./lib.sh && ! grep -q 'reflow_for_telegram()' ./telegram.sh; then
+    pass "reflow_for_telegram is in lib.sh only"
+else
+    fail "reflow_for_telegram is in lib.sh only"
+fi
+
+# Test 61: extract_activity_log parses ⎿ lines into bullet list
+run_test
+test_input="$(printf '❯ do something\n⏺ Working on it\n  ⎿ Read src/index.ts\n  ⎿ Edit src/utils.ts\n  ⎿ Bash: npm test\n')"
+result="$(extract_activity_log "$test_input")"
+if printf '%s' "$result" | grep -q '• Read src/index.ts' && \
+   printf '%s' "$result" | grep -q '• Edit src/utils.ts' && \
+   printf '%s' "$result" | grep -q '• Bash: npm test'; then
+    pass "extract_activity_log parses ⎿ lines into bullet list"
+else
+    fail "extract_activity_log parses ⎿ lines into bullet list" "Got: '$result'"
+fi
+
+# Test 62: extract_activity_log deduplicates repeated tool calls
+run_test
+test_input="$(printf '❯ do something\n  ⎿ Read foo.ts\n  ⎿ Read foo.ts\n  ⎿ Edit bar.ts\n')"
+result="$(extract_activity_log "$test_input")"
+read_count="$(printf '%s' "$result" | grep -c '• Read foo.ts')"
+if [ "$read_count" -eq 1 ]; then
+    pass "extract_activity_log deduplicates repeated tool calls"
+else
+    fail "extract_activity_log deduplicates repeated tool calls" "Read foo.ts appeared $read_count times"
+fi
+
+# Test 63: extract_prompt_text extracts text between ⏺ and ❯ markers
+run_test
+test_input="$(printf '⏺ Here is some old text\n  old content\n⏺ I will now edit the file\n  This is the plan\n❯ 1. Yes\n  2. No\n')"
+result="$(extract_prompt_text "$test_input")"
+if printf '%s' "$result" | grep -q 'This is the plan'; then
+    pass "extract_prompt_text extracts text between ⏺ and ❯ markers"
+else
+    fail "extract_prompt_text extracts text between ⏺ and ❯ markers" "Got: '$result'"
+fi
+
+# Test 64: convert_tables_to_bullets converts pipe-delimited table to bullet format
+run_test
+test_table="$(printf '| Name | Value |\n|------|-------|\n| foo  | bar   |\n| baz  | qux   |\n')"
+result="$(printf '%s' "$test_table" | convert_tables_to_bullets)"
+if printf '%s' "$result" | grep -qF -- '- Name: foo' && \
+   printf '%s' "$result" | grep -qF -- '- Name: baz'; then
+    pass "convert_tables_to_bullets converts table to bullet format"
+else
+    fail "convert_tables_to_bullets converts table to bullet format" "Got: '$result'"
+fi
+
+# Test 65: convert_tables_to_bullets passes non-table lines unchanged
+run_test
+test_mixed="$(printf 'Hello world\n| A | B |\n|---|---|\n| 1 | 2 |\nGoodbye\n')"
+result="$(printf '%s' "$test_mixed" | convert_tables_to_bullets)"
+if printf '%s' "$result" | grep -q 'Hello world' && \
+   printf '%s' "$result" | grep -q 'Goodbye' && \
+   printf '%s' "$result" | grep -qF -- '- A: 1'; then
+    pass "convert_tables_to_bullets passes non-table lines unchanged"
+else
+    fail "convert_tables_to_bullets passes non-table lines unchanged" "Got: '$result'"
+fi
+
+# Test 66: wrap_long_lines wraps at target width
+run_test
+long_line="This is a long line that should be wrapped at a reasonable width for mobile devices to read"
+result="$(printf '%s' "$long_line" | wrap_long_lines 30)"
+max_len=0
+while IFS= read -r line; do
+    len="${#line}"
+    [ "$len" -gt "$max_len" ] && max_len="$len"
+done <<< "$result"
+if [ "$max_len" -le 30 ]; then
+    pass "wrap_long_lines wraps at target width"
+else
+    fail "wrap_long_lines wraps at target width" "Max line length: $max_len (expected <= 30)"
+fi
+
+# Test 67: telegram-send.sh captures 200 lines (-S -200)
+run_test
+if grep -q '\-S -200' ./telegram-send.sh; then
+    pass "telegram-send.sh captures 200 lines (-S -200)"
+else
+    fail "telegram-send.sh captures 200 lines (-S -200)"
+fi
+
+# Test 68: telegram-send.sh uses extract_activity_log
+run_test
+if grep -q 'extract_activity_log' ./telegram-send.sh; then
+    pass "telegram-send.sh uses extract_activity_log"
+else
+    fail "telegram-send.sh uses extract_activity_log"
+fi
+
+# Test 69: telegram-send.sh uses extract_prompt_text
+run_test
+if grep -q 'extract_prompt_text' ./telegram-send.sh; then
+    pass "telegram-send.sh uses extract_prompt_text"
+else
+    fail "telegram-send.sh uses extract_prompt_text"
+fi
+
+# =============================================================================
+# Bot Hardening Tests
+# =============================================================================
+printf "\n${YELLOW}=== Bot Hardening Tests ===${NC}\n"
+
+# Test 70: install.sh restarts Telegram bot if running
+run_test
+if grep -q 'telegram\.sh.*stop' ./install.sh && grep -q 'telegram\.sh.*start' ./install.sh; then
+    pass "install.sh restarts Telegram bot during install"
+else
+    fail "install.sh restarts Telegram bot during install"
+fi
+
+# Test 71: doctor.sh checks for bot log inode mismatch
+run_test
+if grep -q 'lsof' ./doctor.sh && grep -q 'inode' ./doctor.sh; then
+    pass "doctor.sh checks for bot log inode mismatch"
+else
+    fail "doctor.sh checks for bot log inode mismatch"
+fi
+
+# Test 72: telegram.sh log truncation preserves inode (no mv LOG_FILE pattern)
+run_test
+if ! grep -q 'mv.*LOG_FILE' ./telegram.sh; then
+    pass "telegram.sh log truncation preserves inode (no mv pattern)"
+else
+    fail "telegram.sh log truncation preserves inode" "Found mv...LOG_FILE pattern — creates new inode"
 fi
 
 # =============================================================================

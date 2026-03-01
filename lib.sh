@@ -64,3 +64,141 @@ icon_for() {
         idle)     printf '○' ;;
     esac
 }
+
+# Strip leading/trailing blank lines (macOS-compatible)
+# Usage: echo "text" | trim_blank_lines
+trim_blank_lines() {
+    local line lines=() started=0
+    while IFS= read -r line; do
+        if [ "$started" -eq 0 ]; then
+            [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+            started=1
+        fi
+        lines+=("$line")
+    done
+    # Remove trailing blank lines
+    local i=$(( ${#lines[@]} - 1 ))
+    while [ "$i" -ge 0 ] && [[ "${lines[$i]}" =~ ^[[:space:]]*$ ]]; do
+        unset 'lines[$i]'
+        i=$(( i - 1 ))
+    done
+    printf '%s\n' "${lines[@]}"
+}
+
+# Reflow captured terminal output for Telegram readability.
+# Claude Code hard-wraps output at the pane width. This rejoins wrapped prose
+# while preserving structural lines (markers, diffs, lists, prompts).
+# Usage: reflow_for_telegram [pane_width]
+reflow_for_telegram() {
+    local width="${1:-120}"
+    awk -v thr="$((width - 5))" '
+    function structural(s) {
+        if (s ~ /^[[:space:]]*(⏺|⎿|❯|✻)/) return 1
+        if (s ~ /…/) return 1
+        if (s ~ /^[[:space:]]+[0-9]+[[:space:]]+[-+|]/) return 1
+        if (s ~ /^[[:space:]]+[-*][ ]/) return 1
+        if (s ~ /^[[:space:]]+[0-9]+\.[ ]/) return 1
+        if (s ~ /^[[:space:]]*[$>][ ]/) return 1
+        if (s ~ /^(===|---)/) return 1
+        return 0
+    }
+    {
+        rlen = length($0)
+        if ($0 ~ /^[[:space:]]*$/) {
+            if (buf != "") print buf; buf = ""; print; pl = 0
+        } else if (structural($0)) {
+            if (buf != "") print buf; buf = $0; pl = rlen
+        } else if (pl >= thr && buf != "") {
+            sub(/^[[:space:]]+/, ""); buf = buf " " $0; pl = rlen
+        } else {
+            if (buf != "") print buf; buf = $0; pl = rlen
+        }
+    }
+    END { if (buf != "") print buf }
+    '
+}
+
+# Extract activity log from terminal output.
+# Finds ⎿ marker lines in the current work block (after last ❯ line),
+# deduplicates, and formats as bullet list.
+# Usage: extract_activity_log "text" [max_items]
+extract_activity_log() {
+    local text="$1" max="${2:-20}"
+    # Get current work block: everything after the last ❯ line (user input boundary)
+    local work_block
+    work_block="$(printf '%s' "$text" | awk '/❯ / { buf="" } { buf = buf "\n" $0 } END { print buf }')"
+    [ -z "$work_block" ] && work_block="$text"
+
+    # Extract ⎿ lines, deduplicate, format as bullets
+    printf '%s' "$work_block" \
+        | grep -E '^\s*⎿' \
+        | sed 's/^[[:space:]]*⎿[[:space:]]*//' \
+        | sed 's/^[[:space:]]*//' \
+        | grep -v '^[[:space:]]*$' \
+        | awk '!seen[$0]++' \
+        | head -"$max" \
+        | sed 's/^/• /'
+}
+
+# Extract Claude's prompt/speech text.
+# Finds text between the last ⏺ marker and the ❯/numbered options at the bottom.
+# Usage: extract_prompt_text "text" [max_lines]
+extract_prompt_text() {
+    local text="$1" max_lines="${2:-10}"
+    # Find last ⏺ block, take lines until ❯ or numbered option
+    printf '%s' "$text" \
+        | awk '
+        /⏺/ { buf = ""; capturing = 1; next }
+        capturing && /^[[:space:]]*(❯|[0-9]+\.)/ { capturing = 0; next }
+        capturing { buf = buf "\n" $0 }
+        END { print buf }
+        ' \
+        | sed '/^[[:space:]]*$/d' \
+        | sed 's/^[[:space:]]*//' \
+        | head -"$max_lines"
+}
+
+# Convert markdown pipe-delimited tables to bullet format for mobile.
+# Pipe filter: detects |col|col| rows, skips |---| separators,
+# outputs "- col1: col2" bullets. Non-table lines pass through unchanged.
+# Usage: echo "text" | convert_tables_to_bullets
+convert_tables_to_bullets() {
+    awk '
+    BEGIN { header_count = 0; split("", headers) }
+    /^\|[-:[:space:]]+\|/ { next }
+    /^\|.*\|$/ {
+        # Strip leading/trailing |, split by |
+        line = $0
+        gsub(/^[[:space:]]*\|/, "", line)
+        gsub(/\|[[:space:]]*$/, "", line)
+        n = split(line, cols, "|")
+        for (i = 1; i <= n; i++) {
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", cols[i])
+        }
+        if (header_count == 0) {
+            header_count = n
+            for (i = 1; i <= n; i++) headers[i] = cols[i]
+        } else {
+            out = "- "
+            for (i = 1; i <= n; i++) {
+                if (i > 1) out = out ", "
+                if (i <= header_count && headers[i] != "") {
+                    out = out headers[i] ": " cols[i]
+                } else {
+                    out = out cols[i]
+                }
+            }
+            print out
+        }
+        next
+    }
+    { header_count = 0; print }
+    '
+}
+
+# Wrap long lines for mobile-friendly display.
+# Usage: echo "text" | wrap_long_lines [width]
+wrap_long_lines() {
+    local width="${1:-50}"
+    fold -s -w "$width"
+}

@@ -13,58 +13,6 @@ LOG_FILE="${DATA_DIR}/telegram.log"
 ACTIVE_DIR="${DATA_DIR}/active"
 NOTIF_DIR="${DATA_DIR}/notifications"
 
-# Strip leading/trailing blank lines (macOS-compatible)
-trim_blank_lines() {
-    local line lines=() started=0
-    while IFS= read -r line; do
-        if [ "$started" -eq 0 ]; then
-            [[ "$line" =~ ^[[:space:]]*$ ]] && continue
-            started=1
-        fi
-        lines+=("$line")
-    done
-    # Remove trailing blank lines
-    local i=$(( ${#lines[@]} - 1 ))
-    while [ "$i" -ge 0 ] && [[ "${lines[$i]}" =~ ^[[:space:]]*$ ]]; do
-        unset 'lines[$i]'
-        i=$(( i - 1 ))
-    done
-    printf '%s\n' "${lines[@]}"
-}
-
-# Reflow captured terminal output for Telegram readability.
-# Claude Code hard-wraps output at the pane width. This rejoins wrapped prose
-# while preserving structural lines (markers, diffs, lists, prompts).
-# Usage: reflow_for_telegram [pane_width]
-reflow_for_telegram() {
-    local width="${1:-120}"
-    awk -v thr="$((width - 5))" '
-    function structural(s) {
-        if (s ~ /^[[:space:]]*(⏺|⎿|❯|✻)/) return 1
-        if (s ~ /…/) return 1
-        if (s ~ /^[[:space:]]+[0-9]+[[:space:]]+[-+|]/) return 1
-        if (s ~ /^[[:space:]]+[-*][ ]/) return 1
-        if (s ~ /^[[:space:]]+[0-9]+\.[ ]/) return 1
-        if (s ~ /^[[:space:]]*[$>][ ]/) return 1
-        if (s ~ /^(===|---)/) return 1
-        return 0
-    }
-    {
-        rlen = length($0)
-        if ($0 ~ /^[[:space:]]*$/) {
-            if (buf != "") print buf; buf = ""; print; pl = 0
-        } else if (structural($0)) {
-            if (buf != "") print buf; buf = $0; pl = rlen
-        } else if (pl >= thr && buf != "") {
-            sub(/^[[:space:]]+/, ""); buf = buf " " $0; pl = rlen
-        } else {
-            if (buf != "") print buf; buf = $0; pl = rlen
-        }
-    }
-    END { if (buf != "") print buf }
-    '
-}
-
 # Check dependencies
 for cmd in curl jq tmux; do
     command -v "$cmd" &>/dev/null || { printf 'Error: %s required\n' "$cmd"; exit 1; }
@@ -390,7 +338,8 @@ cmd_view() {
     local rw="${REFLOW_WIDTH:-$(tmux display-message -t "${S_SESS}:${S_WIN}" -p '#{pane_width}' 2>/dev/null || echo 120)}"
     local output
     output="$(tmux capture-pane -t "${S_SESS}:${S_WIN}" -J -p -S -200 2>/dev/null \
-        | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' | reflow_for_telegram "$rw")" || {
+        | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' | reflow_for_telegram "$rw" \
+        | convert_tables_to_bullets | wrap_long_lines 50)" || {
         send_message "Could not capture output from ${S_SESS}:${S_WIN}"
         return
     }
@@ -568,7 +517,8 @@ handle_callback() {
             local rw="${REFLOW_WIDTH:-$(tmux display-message -t "${sess}:${win}" -p '#{pane_width}' 2>/dev/null || echo 120)}"
             local output
             output="$(tmux capture-pane -t "${sess}:${win}" -J -p -S -200 2>/dev/null \
-                | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' | reflow_for_telegram "$rw")" || output="(could not capture)"
+                | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' | reflow_for_telegram "$rw" \
+                | convert_tables_to_bullets | wrap_long_lines 50)" || output="(could not capture)"
             output="$(printf '%s' "$output" | trim_blank_lines)"
             if [ -z "$output" ]; then
                 send_message "<b>${sess}:${win}</b>\n\n(empty)"
@@ -689,7 +639,9 @@ cmd_run_daemon() {
     load_config
     # Truncate log to last 200 lines on restart (clears stale errors)
     if [ -f "$LOG_FILE" ]; then
-        tail -200 "$LOG_FILE" > "${LOG_FILE}.tmp" && mv "${LOG_FILE}.tmp" "$LOG_FILE" 2>/dev/null || true
+        local tmp
+        tmp="$(tail -200 "$LOG_FILE")"
+        printf '%s\n' "$tmp" > "$LOG_FILE"
     fi
     printf '[%s] Telegram bot started (PID %d)\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$$"
 
@@ -711,10 +663,11 @@ cmd_run_daemon() {
             ]
         }' >/dev/null 2>&1 || true
 
-    # Notify that bot has started
+    # Notify that bot has started + run doctor
     local ver=""
     [ -f "${SCRIPT_DIR}/VERSION" ] && ver=" v$(<"${SCRIPT_DIR}/VERSION")" && ver="${ver%$'\n'}"
     send_message "Bot started${ver}"
+    cmd_doctor
 
     local offset=0
 

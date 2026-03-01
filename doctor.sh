@@ -194,6 +194,45 @@ else
     else
         result_warn "Telegram config incomplete (missing BOT_TOKEN or CHAT_ID)"
     fi
+
+    # Check bot process health
+    bot_pid_file="${DATA_DIR}/telegram.pid"
+    if [ -f "$bot_pid_file" ]; then
+        bot_pid="$(<"$bot_pid_file")"
+        if kill -0 "$bot_pid" 2>/dev/null; then
+            result_pass "Telegram bot running (PID ${bot_pid})"
+
+            # Stale code check: compare installed_version mtime vs process start time
+            version_file="${DATA_DIR}/installed_version"
+            if [ -f "$version_file" ]; then
+                version_mtime="$(stat -f %m "$version_file" 2>/dev/null || stat -c %Y "$version_file" 2>/dev/null)" || version_mtime=""
+                proc_start="$(ps -o lstart= -p "$bot_pid" 2>/dev/null)" || proc_start=""
+                if [ -n "$version_mtime" ] && [ -n "$proc_start" ]; then
+                    proc_epoch="$(date -jf '%a %b %d %T %Y' "$proc_start" +%s 2>/dev/null || date -d "$proc_start" +%s 2>/dev/null)" || proc_epoch=""
+                    if [ -n "$proc_epoch" ] && [ "$version_mtime" -gt "$proc_epoch" ]; then
+                        result_warn "Telegram bot running stale code — restart with: telegram.sh stop && telegram.sh start"
+                    else
+                        result_pass "Telegram bot code is up to date"
+                    fi
+                fi
+            fi
+
+            # Log inode mismatch check
+            log_file="${DATA_DIR}/telegram.log"
+            if [ -f "$log_file" ] && command -v lsof &>/dev/null; then
+                disk_inode="$(stat -f %i "$log_file" 2>/dev/null || stat -c %i "$log_file" 2>/dev/null)" || disk_inode=""
+                proc_inode="$(lsof -p "$bot_pid" 2>/dev/null | grep 'telegram\.log' | awk '{print $8}' | head -1)" || proc_inode=""
+                if [ -n "$disk_inode" ] && [ -n "$proc_inode" ] && [ "$disk_inode" != "$proc_inode" ]; then
+                    result_warn "Telegram bot log inode mismatch — bot output not reaching log file"
+                elif [ -n "$disk_inode" ] && [ -n "$proc_inode" ]; then
+                    result_pass "Telegram bot log inode matches"
+                fi
+            fi
+        else
+            result_warn "Telegram bot not running (stale PID file)"
+            rm -f "$bot_pid_file"
+        fi
+    fi
 fi
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
