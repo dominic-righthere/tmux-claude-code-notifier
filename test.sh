@@ -1465,6 +1465,30 @@ else
     fail "telegram-send.sh handles prompt type"
 fi
 
+# Test 124: telegram-send.sh has detect_mode function
+run_test
+if grep -q '^detect_mode()' ./telegram-send.sh; then
+    pass "telegram-send.sh has detect_mode function"
+else
+    fail "telegram-send.sh has detect_mode function"
+fi
+
+# Test 125: detect_mode extracts mode from ⏵⏵ indicator (not hardcoded)
+run_test
+if sed -n '/^detect_mode()/,/^}/p' ./telegram-send.sh | grep -q '⏵⏵'; then
+    pass "detect_mode keys off ⏵⏵ indicator"
+else
+    fail "detect_mode keys off ⏵⏵ indicator"
+fi
+
+# Test 126: build_keyboard skips approve/deny in auto mode
+run_test
+if grep -q 'mode_auto' ./telegram-send.sh; then
+    pass "build_keyboard checks mode_auto"
+else
+    fail "build_keyboard checks mode_auto"
+fi
+
 # =============================================================================
 # Summary
 # =============================================================================

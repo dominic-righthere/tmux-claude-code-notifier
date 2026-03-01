@@ -47,10 +47,40 @@ project_name=""
 pane_path="$(tmux display-message -t "${SESSION}:${WINDOW}" -p '#{pane_current_path}' 2>/dev/null)" || pane_path=""
 [ -n "$pane_path" ] && project_name="$(basename "$pane_path")"
 
+# ─── Mode detection ──────────────────────────────────────────────────────────
+
+# Detect Claude Code mode from pane content.
+# ⏵⏵ is the universal signal for auto-accept modes — any mode using it
+# means permissions are auto-accepted and approve/deny buttons are useless.
+# Sets: mode_label  (display string for header, extracted from terminal)
+#       mode_auto   (non-empty if permissions are auto-accepted)
+detect_mode() {
+    local context="$1"
+    mode_label=""
+    mode_auto=""
+    [ -z "$context" ] && return
+
+    # ⏵⏵ signals auto-accept — extract the actual label from the terminal
+    local match
+    match="$(printf '%s' "$context" | grep -o '⏵⏵[^(]*' | tail -1)" || match=""
+    if [ -n "$match" ]; then
+        match="${match%"${match##*[![:space:]]}"}"  # trim trailing whitespace
+        mode_label="$match"
+        mode_auto=true
+        return
+    fi
+
+    # Other mode indicators
+    if printf '%s' "$context" | grep -qi 'plan mode'; then
+        mode_label="⏸ plan mode"
+    fi
+}
+
 # Capture pane context (not needed for prompt type — we have the text already)
 raw_context=""
 pane_width="120"
 mode_label=""
+mode_auto=""
 if [ "$TYPE" != "prompt" ]; then
     sleep 0.3  # ensure prompt is rendered
     pane_width="$(tmux display-message -t "${SESSION}:${WINDOW}" -p '#{pane_width}' 2>/dev/null)" || pane_width="120"
@@ -64,14 +94,7 @@ if [ "$TYPE" != "prompt" ]; then
         done
     fi
 
-    # Detect mode from raw_context
-    if [ -n "$raw_context" ]; then
-        if printf '%s' "$raw_context" | grep -qi 'plan mode'; then
-            mode_label="⏸ plan mode"
-        elif printf '%s' "$raw_context" | grep -qi 'auto-accept\|accept edits'; then
-            mode_label="⏵⏵ auto-accept"
-        fi
-    fi
+    detect_mode "$raw_context"
 fi
 
 # ─── Modular message pipeline ────────────────────────────────────────────────
@@ -201,7 +224,7 @@ build_keyboard() {
     kb_style="default"
     local btn_count=0
 
-    if [ "$TYPE" = "waiting" ] && [ -n "$TOOL_NAME" ]; then
+    if [ "$TYPE" = "waiting" ] && [ -n "$TOOL_NAME" ] && [ -z "$mode_auto" ]; then
         # Extract prompt block: lines after last ⏺ marker (same scoping as extract_prompt_text)
         local prompt_block=""
         if [ -n "$raw_context" ]; then
