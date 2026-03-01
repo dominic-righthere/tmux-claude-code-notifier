@@ -189,11 +189,12 @@ extract_activity_log() {
 
 # Extract Claude's prompt/speech text.
 # Finds text between the last ⏺ marker and the ❯/numbered options at the bottom.
-# Usage: extract_prompt_text "text" [max_lines]
+# Usage: extract_prompt_text "text" [max_chars]
 extract_prompt_text() {
-    local text="$1" max_lines="${2:-10}"
+    local text="$1" max_chars="${2:-1500}"
     # Find last ⏺ block, take lines until ❯ or numbered option
-    printf '%s' "$text" \
+    local extracted
+    extracted="$(printf '%s' "$text" \
         | awk '
         /⏺/ { buf = ""; capturing = 1; next }
         capturing && /^[[:space:]]*(❯|[0-9]+\.)/ { capturing = 0; next }
@@ -201,8 +202,18 @@ extract_prompt_text() {
         END { print buf }
         ' \
         | sed '/^[[:space:]]*$/d' \
-        | sed 's/^[[:space:]]*//' \
-        | head -"$max_lines"
+        | sed 's/^[[:space:]]*//')"
+    # Truncate at last newline before budget
+    if [ "${#extracted}" -gt "$max_chars" ]; then
+        extracted="${extracted:0:$max_chars}"
+        # Find last newline for clean line boundary
+        local last_nl="${extracted%$'\n'*}"
+        if [ "$last_nl" != "$extracted" ] && [ -n "$last_nl" ]; then
+            extracted="$last_nl"
+        fi
+        extracted="${extracted}..."
+    fi
+    printf '%s' "$extracted"
 }
 
 # Convert markdown pipe-delimited tables to bullet format for mobile.

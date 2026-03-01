@@ -865,14 +865,14 @@ else
     fail "extract_activity_log deduplicates repeated tool calls" "Read foo.ts appeared $read_count times"
 fi
 
-# Test 63: extract_prompt_text extracts text between ⏺ and ❯ markers
+# Test 63: extract_prompt_text extracts text between ⏺ and ❯ markers (char budget)
 run_test
 test_input="$(printf '⏺ Here is some old text\n  old content\n⏺ I will now edit the file\n  This is the plan\n❯ 1. Yes\n  2. No\n')"
-result="$(extract_prompt_text "$test_input")"
+result="$(extract_prompt_text "$test_input" 1500)"
 if printf '%s' "$result" | grep -q 'This is the plan'; then
-    pass "extract_prompt_text extracts text between ⏺ and ❯ markers"
+    pass "extract_prompt_text extracts text between ⏺ and ❯ markers (char budget)"
 else
-    fail "extract_prompt_text extracts text between ⏺ and ❯ markers" "Got: '$result'"
+    fail "extract_prompt_text extracts text between ⏺ and ❯ markers (char budget)" "Got: '$result'"
 fi
 
 # Test 64: convert_tables_to_bullets converts pipe-delimited table to bullet format
@@ -1274,6 +1274,54 @@ fi
 
 # Restore EVENTS_DB for any subsequent tests
 EVENTS_DB="${HOME}/.local/share/claude-notifier/events.db"
+
+# =============================================================================
+# Char-Budget & Pipeline Tests
+# =============================================================================
+printf "\n${YELLOW}=== Char-Budget & Pipeline Tests ===${NC}\n"
+
+# Test 104: extract_prompt_text respects char budget on long input
+run_test
+long_lines=""
+for i in $(seq 1 50); do
+    long_lines="${long_lines}This is line number ${i} with some padding text to make it longer.\n"
+done
+long_input="$(printf "⏺ Starting work\n${long_lines}❯ 1. Yes\n")"
+result="$(extract_prompt_text "$long_input" 200)"
+if [ "${#result}" -le 210 ] && printf '%s' "$result" | grep -q '\.\.\.'; then
+    pass "extract_prompt_text respects char budget on long input"
+else
+    fail "extract_prompt_text respects char budget on long input" "Length: ${#result}, ends with ...: $(printf '%s' "$result" | tail -c 5)"
+fi
+
+# Test 105: extract_prompt_text returns full text when under budget
+run_test
+short_input="$(printf '⏺ A short message\n  Just a few words here\n❯ 1. Ok\n')"
+result="$(extract_prompt_text "$short_input" 1500)"
+if printf '%s' "$result" | grep -q 'Just a few words here' && ! printf '%s' "$result" | grep -q '\.\.\.'; then
+    pass "extract_prompt_text returns full text when under budget"
+else
+    fail "extract_prompt_text returns full text when under budget" "Got: '$result'"
+fi
+
+# Test 106: telegram-send.sh extracts before wrapping (wrap_long_lines after extract_prompt_text)
+run_test
+# extract_prompt_text should use reflowed (not wrapped) text, then wrap_long_lines runs after
+extract_line="$(grep -n 'extract_prompt_text.*reflowed' ./telegram-send.sh | head -1 | cut -d: -f1)"
+wrap_line="$(grep -n 'prompt_text.*wrap_long_lines' ./telegram-send.sh | head -1 | cut -d: -f1)"
+if [ -n "$extract_line" ] && [ -n "$wrap_line" ] && [ "$wrap_line" -gt "$extract_line" ]; then
+    pass "telegram-send.sh extracts before wrapping"
+else
+    fail "telegram-send.sh extracts before wrapping" "extract_line=$extract_line wrap_line=$wrap_line"
+fi
+
+# Test 107: notify.sh extracts prompt from UserPromptSubmit
+run_test
+if sed -n '/UserPromptSubmit)/,/;;/p' ./notify.sh | grep -q 'extract_json_value.*prompt'; then
+    pass "notify.sh extracts prompt from UserPromptSubmit"
+else
+    fail "notify.sh extracts prompt from UserPromptSubmit"
+fi
 
 # =============================================================================
 # Summary

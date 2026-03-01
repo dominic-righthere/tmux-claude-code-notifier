@@ -75,7 +75,12 @@ case "$EVENT" in
         # Claude is working — mark active, clear notification + msg_id
         write_file "$ACTIVE_DIR" "working" "Working..."
         rm -f "${NOTIF_DIR}/${KEY}" "${MSG_ID_DIR}/${KEY}"
-        log_event src hook event UserPromptSubmit session "$SESSION" window "$WINDOW"
+        # Extract user prompt text and log it (truncate at 500 chars for DB sanity)
+        USER_PROMPT="$(extract_json_value "$INPUT" "prompt")"
+        if [ "${#USER_PROMPT}" -gt 500 ]; then
+            USER_PROMPT="${USER_PROMPT:0:500}"
+        fi
+        log_event src hook event UserPromptSubmit session "$SESSION" window "$WINDOW" text "$USER_PROMPT"
         ;;
     PreToolUse)
         # Live tool activity — show what Claude is doing instead of "Working..."

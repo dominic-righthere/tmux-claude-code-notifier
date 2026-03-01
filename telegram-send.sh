@@ -100,13 +100,21 @@ text="$(printf '%b' "$text")"
 
 # Extract structured content from raw context
 if [ -n "$raw_context" ]; then
-    # Apply formatting pipeline
-    formatted="$(printf '%s' "$raw_context" | reflow_for_telegram "$pane_width" | convert_tables_to_bullets | wrap_long_lines 50)"
+    # Reflow and convert tables (but do NOT wrap yet — wrapping inflates line count)
+    reflowed="$(printf '%s' "$raw_context" | reflow_for_telegram "$pane_width" | convert_tables_to_bullets)"
 
-    # Extract prompt text (what Claude is asking/saying)
-    prompt_text="$(extract_prompt_text "$formatted" 8)"
+    # Calculate character budget for prompt text: 4096 - header - activity reserve
+    header_len="${#text}"
+    prompt_budget=$(( 4096 - header_len - 600 ))
+    [ "$prompt_budget" -lt 200 ] && prompt_budget=200
+    [ "$prompt_budget" -gt 3000 ] && prompt_budget=3000
+
+    # Extract prompt text with char budget (from unwrapped text)
+    prompt_text="$(extract_prompt_text "$reflowed" "$prompt_budget")"
     prompt_escaped=""
     if [ -n "$prompt_text" ]; then
+        # Wrap for display AFTER extraction
+        prompt_text="$(printf '%s' "$prompt_text" | wrap_long_lines 50)"
         prompt_escaped="$(html_escape "$prompt_text")"
     fi
 
@@ -127,9 +135,9 @@ ${prompt_escaped}"
 
     # 2. Activity log or raw fallback in expandable blockquote
     if [ -n "$activity_escaped" ]; then
-        # Structured activity log
-        header_len="${#text}"
-        max_activity=$(( 4096 - header_len - 200 ))
+        # Recalculate budget from actual space used
+        cur_len="${#text}"
+        max_activity=$(( 4096 - cur_len - 200 ))
         if [ "$max_activity" -gt 100 ] && [ "${#activity_escaped}" -le "$max_activity" ]; then
             text="${text}
 
@@ -137,10 +145,11 @@ ${prompt_escaped}"
 ${activity_escaped}</blockquote>"
         fi
     else
-        # Fallback: raw context in expandable blockquote (like before)
+        # Fallback: raw context in expandable blockquote
+        formatted="$(printf '%s' "$reflowed" | wrap_long_lines 50)"
         pane_context="$(html_escape "$formatted")"
-        header_len="${#text}"
-        max_context=$(( 4096 - header_len - 100 ))
+        cur_len="${#text}"
+        max_context=$(( 4096 - cur_len - 100 ))
         if [ "$max_context" -gt 100 ]; then
             if [ "${#pane_context}" -gt "$max_context" ]; then
                 pane_context="...${pane_context:$((${#pane_context} - max_context))}"
