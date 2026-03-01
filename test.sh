@@ -40,25 +40,13 @@ run_test() {
 }
 
 # =============================================================================
-# JSON Parser Tests
+# JSON Parser Tests (jq-based)
 # =============================================================================
 printf "\n${YELLOW}=== JSON Parser Tests ===${NC}\n"
 
-# Extract the function from notify.sh for testing
-extract_json_value() {
-    local json="$1" key="$2"
-    # Replace \" with placeholder, extract, then restore
-    local cleaned="${json//\\\"/@@Q@@}"
-    local pattern="\"${key}\":\"([^\"]*)\""
-    if [[ "$cleaned" =~ $pattern ]]; then
-        local val="${BASH_REMATCH[1]}"
-        printf '%s' "${val//@@Q@@/\"}"
-    fi
-}
-
 # Test 1: Simple value extraction
 run_test
-result=$(extract_json_value '{"key":"value"}' "key")
+result=$(printf '{"key":"value"}' | jq -r '.key // empty')
 if [ "$result" = "value" ]; then
     pass "Simple value extraction"
 else
@@ -67,7 +55,7 @@ fi
 
 # Test 2: Escaped quotes in value
 run_test
-result=$(extract_json_value '{"msg":"He said \"hello\""}' "msg")
+result=$(printf '{"msg":"He said \\"hello\\""}' | jq -r '.msg // empty')
 if [ "$result" = 'He said "hello"' ]; then
     pass "Escaped quotes extraction"
 else
@@ -76,7 +64,7 @@ fi
 
 # Test 3: Missing key returns empty
 run_test
-result=$(extract_json_value '{"key":"value"}' "missing")
+result=$(printf '{"key":"value"}' | jq -r '.missing // empty')
 if [ -z "$result" ]; then
     pass "Missing key returns empty"
 else
@@ -85,7 +73,7 @@ fi
 
 # Test 4: Multiple fields - extract specific one
 run_test
-result=$(extract_json_value '{"hook_event_name":"Stop","message":"test"}' "hook_event_name")
+result=$(printf '{"hook_event_name":"Stop","message":"test"}' | jq -r '.hook_event_name // empty')
 if [ "$result" = "Stop" ]; then
     pass "Extract from multiple fields"
 else
@@ -94,7 +82,7 @@ fi
 
 # Test 5: Complex message with escaped quotes
 run_test
-result=$(extract_json_value '{"hook_event_name":"Notification","message":"User said \"yes\" to proceed"}' "message")
+result=$(printf '{"hook_event_name":"Notification","message":"User said \\"yes\\" to proceed"}' | jq -r '.message // empty')
 if [ "$result" = 'User said "yes" to proceed' ]; then
     pass "Complex message with escaped quotes"
 else
@@ -334,7 +322,7 @@ printf "\n${YELLOW}=== Integration Tests ===${NC}\n"
 
 # Test 16: Full hook flow with escaped quotes
 run_test
-result=$(extract_json_value '{"hook_event_name":"Notification","message":"Task \"build\" completed"}' "message")
+result=$(printf '{"hook_event_name":"Notification","message":"Task \\"build\\" completed"}' | jq -r '.message // empty')
 if [ "$result" = 'Task "build" completed' ]; then
     pass "Full hook flow with escaped quotes"
 else
@@ -944,7 +932,7 @@ printf "\n${YELLOW}=== Bot Hardening Tests ===${NC}\n"
 
 # Test 70: install.sh restarts Telegram bot if running
 run_test
-if grep -q 'telegram\.sh.*stop' ./install.sh && grep -q 'telegram\.sh.*start' ./install.sh; then
+if grep -q 'telegram-bot\.sh.*stop' ./install.sh && grep -q 'telegram-bot\.sh.*start' ./install.sh; then
     pass "install.sh restarts Telegram bot during install"
 else
     fail "install.sh restarts Telegram bot during install"
@@ -1435,7 +1423,7 @@ fi
 
 # Test 120: notify.sh extracts prompt from UserPromptSubmit
 run_test
-if sed -n '/UserPromptSubmit)/,/;;/p' ./notify.sh | grep -q 'extract_json_value.*prompt'; then
+if sed -n '/UserPromptSubmit)/,/;;/p' ./notify.sh | grep -q '\.prompt'; then
     pass "notify.sh extracts prompt from UserPromptSubmit"
 else
     fail "notify.sh extracts prompt from UserPromptSubmit"
@@ -1487,6 +1475,97 @@ if grep -q 'mode_auto' ./telegram-send.sh; then
     pass "build_keyboard checks mode_auto"
 else
     fail "build_keyboard checks mode_auto"
+fi
+
+# =============================================================================
+# Stale Waiting Fix Tests
+# =============================================================================
+printf "\n${YELLOW}=== Stale Waiting Fix Tests ===${NC}\n"
+
+# Test 127: PreToolUse clears notification state
+run_test
+if sed -n '/PreToolUse)/,/;;/p' ./notify.sh | grep -q 'rm -f.*NOTIF_DIR'; then
+    pass "PreToolUse clears notification state"
+else
+    fail "PreToolUse clears notification state"
+fi
+
+# Test 128: Stop handler always dispatches finished (no waiting guard)
+run_test
+if sed -n '/Stop)/,/;;/p' ./notify.sh | grep -q 'skipped'; then
+    fail "Stop handler still has waiting guard"
+else
+    pass "Stop handler always dispatches finished"
+fi
+
+# Test 129: build_keyboard detects options without TOOL_NAME
+run_test
+# The outer condition should check TYPE=waiting without requiring TOOL_NAME
+if grep -A2 'build_keyboard()' ./telegram-send.sh | grep -q 'TOOL_NAME'; then
+    fail "build_keyboard still requires TOOL_NAME for option detection"
+else
+    pass "build_keyboard detects options without TOOL_NAME"
+fi
+
+# Test 130: mode is logged in dispatch log_event
+run_test
+if grep 'log_event.*event dispatch' ./telegram-send.sh | grep -q 'mode'; then
+    pass "mode is logged in dispatch log_event"
+else
+    fail "mode is logged in dispatch log_event"
+fi
+
+# =============================================================================
+# Lean Message Body Tests
+# =============================================================================
+printf "\n${YELLOW}=== Lean Message Body Tests ===${NC}\n"
+
+# Test 131: finished body skips prompt text extraction
+run_test
+if grep -A5 'skip for finished' ./telegram-send.sh | grep -q 'TYPE.*!=.*finished'; then
+    pass "finished body skips prompt text extraction"
+else
+    fail "finished body skips prompt text extraction"
+fi
+
+# Test 132: waiting body skips activity blockquote
+run_test
+if grep -A2 'skip for waiting' ./telegram-send.sh | grep -q 'TYPE.*!=.*waiting'; then
+    pass "waiting body skips activity blockquote"
+else
+    fail "waiting body skips activity blockquote"
+fi
+
+# Test 133: raw context is logged to events DB
+run_test
+if grep -q 'log_event.*event context' ./telegram-send.sh; then
+    pass "raw context is logged to events DB"
+else
+    fail "raw context is logged to events DB"
+fi
+
+# Test 134: build_keyboard scopes options to after last separator (───── or ╌╌╌╌╌)
+run_test
+if grep -q '╌' ./telegram-send.sh && grep -q 'buf = "".*next' ./telegram-send.sh; then
+    pass "build_keyboard scopes options to after last separator"
+else
+    fail "build_keyboard scopes options to after last separator"
+fi
+
+# Test 135: send_or_edit does not store msg_id for prompt messages
+run_test
+if grep -q 'TYPE.*!=.*"prompt"' ./telegram-send.sh && grep -q 'new_msg_id.*TYPE.*!=.*prompt' ./telegram-send.sh; then
+    pass "send_or_edit does not store msg_id for prompt messages"
+else
+    fail "send_or_edit does not store msg_id for prompt messages"
+fi
+
+# Test 136: waiting messages are skipped in auto-accept mode
+run_test
+if grep -q 'skip_auto' ./telegram-send.sh && grep -q 'TYPE.*waiting.*mode_auto' ./telegram-send.sh; then
+    pass "waiting messages are skipped in auto-accept mode"
+else
+    fail "waiting messages are skipped in auto-accept mode"
 fi
 
 # =============================================================================

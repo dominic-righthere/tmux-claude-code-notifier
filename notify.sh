@@ -10,27 +10,16 @@ ACTIVE_DIR="${DATA_DIR}/active"
 NOTIF_DIR="${DATA_DIR}/notifications"
 MSG_ID_DIR="${DATA_DIR}/telegram_msg_ids"
 mkdir -p "$ACTIVE_DIR" "$NOTIF_DIR"
+chmod 700 "$DATA_DIR"
 
 # Read JSON from stdin
 INPUT="$(cat)"
 
-# Parse JSON fields with pure bash (avoids python3 spawn overhead ~50-80ms)
-# JSON format: {"hook_event_name":"X","message":"Y","tool_name":"Z"}
-extract_json_value() {
-    local json="$1" key="$2"
-    # Replace \" with placeholder, extract, then restore
-    local cleaned="${json//\\\"/@@Q@@}"
-    local pattern="\"${key}\":\"([^\"]*)\""
-    if [[ "$cleaned" =~ $pattern ]]; then
-        local val="${BASH_REMATCH[1]}"
-        printf '%s' "${val//@@Q@@/\"}"
-    fi
-}
-
-EVENT="$(extract_json_value "$INPUT" "hook_event_name")"
-MSG="$(extract_json_value "$INPUT" "message")"
-TOOL_NAME="$(extract_json_value "$INPUT" "tool_name")"
-TOOL_INPUT="$(extract_json_value "$INPUT" "tool_input")"
+# Parse JSON fields with jq
+EVENT="$(printf '%s' "$INPUT" | jq -r '.hook_event_name // empty')"
+MSG="$(printf '%s' "$INPUT" | jq -r '.message // empty')"
+TOOL_NAME="$(printf '%s' "$INPUT" | jq -r '.tool_name // empty')"
+TOOL_INPUT="$(printf '%s' "$INPUT" | jq -r '.tool_input // empty')"
 
 # Exit if we couldn't parse the event
 [ -z "$EVENT" ] && exit 0
@@ -76,7 +65,7 @@ case "$EVENT" in
         write_file "$ACTIVE_DIR" "working" "Working..."
         rm -f "${NOTIF_DIR}/${KEY}" "${MSG_ID_DIR}/${KEY}"
         # Extract user prompt text and log it (truncate at 500 chars for DB sanity)
-        USER_PROMPT="$(extract_json_value "$INPUT" "prompt")"
+        USER_PROMPT="$(printf '%s' "$INPUT" | jq -r '.prompt // empty')"
         if [ "${#USER_PROMPT}" -gt 500 ]; then
             USER_PROMPT="${USER_PROMPT:0:500}"
         fi
@@ -90,23 +79,16 @@ case "$EVENT" in
         # Live tool activity — show what Claude is doing instead of "Working..."
         tool_label="${TOOL_NAME:-tool}"
         write_file "$ACTIVE_DIR" "working" "${tool_label}..."
+        rm -f "${NOTIF_DIR}/${KEY}"    # clear stale waiting (permission was resolved)
         log_event src hook event PreToolUse session "$SESSION" window "$WINDOW" tool "$TOOL_NAME"
         ;;
     Stop)
         # Claude finished — mark as idle (keep in active dir for visibility)
         write_file "$ACTIVE_DIR" "idle" "Idle"
-        # Don't overwrite a waiting notification (permission request / notification)
-        EXISTING_TYPE="$(read_state_field "${NOTIF_DIR}/${KEY}" "TYPE" 2>/dev/null)" || EXISTING_TYPE=""
-        if [ "$EXISTING_TYPE" = "waiting" ]; then
-            # Keep the existing waiting notification, just ring bell
-            printf '\a'
-            log_event src hook event Stop session "$SESSION" window "$WINDOW" message "skipped (waiting exists)"
-        else
-            write_file "$NOTIF_DIR" "finished" "Finished"
-            printf '\a'
-            "${SCRIPT_DIR}/dispatch.sh" "finished" "$SESSION" "$WINDOW" "Finished" &
-            log_event src hook event Stop session "$SESSION" window "$WINDOW" type finished
-        fi
+        write_file "$NOTIF_DIR" "finished" "Finished"
+        printf '\a'
+        "${SCRIPT_DIR}/dispatch.sh" "finished" "$SESSION" "$WINDOW" "Finished" &
+        log_event src hook event Stop session "$SESSION" window "$WINDOW" type finished
         ;;
     Notification)
         [ -z "$MSG" ] && MSG="Notification"

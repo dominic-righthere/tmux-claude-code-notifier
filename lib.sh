@@ -9,6 +9,7 @@ EVENTS_DB="${HOME}/.local/share/claude-notifier/events.db"
 init_events_db() {
     [ -f "$EVENTS_DB" ] && return 0
     mkdir -p "$(dirname "$EVENTS_DB")"
+    chmod 700 "$(dirname "$EVENTS_DB")"
     sqlite3 "$EVENTS_DB" <<'SQL' >/dev/null
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

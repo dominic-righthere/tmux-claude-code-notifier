@@ -9,6 +9,7 @@ DATA_DIR="${HOME}/.local/share/claude-notifier"
 ACTIVE_DIR="${DATA_DIR}/active"
 NOTIF_DIR="${DATA_DIR}/notifications"
 mkdir -p "$ACTIVE_DIR" "$NOTIF_DIR"
+chmod 700 "$DATA_DIR"
 
 NOW="$(date +%s)"
 
@@ -42,12 +43,12 @@ parse_file() {
         esac
     done < "$file" || true
     [ -z "$_session" ] && return 1
-    eval "${prefix}_SESSION=\$_session"
-    eval "${prefix}_WINDOW=\$_window"
-    eval "${prefix}_WINDOW_NAME=\$_window_name"
-    eval "${prefix}_MESSAGE=\$_message"
-    eval "${prefix}_TYPE=\$_type"
-    eval "${prefix}_TIMESTAMP=\$_timestamp"
+    declare -g "${prefix}_SESSION=$_session"
+    declare -g "${prefix}_WINDOW=$_window"
+    declare -g "${prefix}_WINDOW_NAME=$_window_name"
+    declare -g "${prefix}_MESSAGE=$_message"
+    declare -g "${prefix}_TYPE=$_type"
+    declare -g "${prefix}_TIMESTAMP=$_timestamp"
     return 0
 }
 
