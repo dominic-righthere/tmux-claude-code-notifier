@@ -604,6 +604,28 @@ cmd_restart() {
 
 # ─── Callback handler (inline keyboard buttons) ──────────────────────────────
 
+# Handle approve/deny/opt callback actions with shared logic
+# Usage: handle_action <callback_id> <sess> <win> <keys> <label> <cb_msg_id>
+handle_action() {
+    local callback_id="$1" sess="$2" win="$3" keys="$4" label="$5" cb_msg_id="${6:-}"
+    if ! check_target "$sess" "$win"; then
+        answer_callback "$callback_id" "$CHECK_ERR"
+        clear_session_state "$sess" "$win"
+        [ -n "$cb_msg_id" ] && strip_buttons "$cb_msg_id"
+        log_event src bot event callback_fail action "$label" session "$sess" window "$win"
+        return
+    fi
+    if tmux send-keys -t "${sess}:${win}" $keys 2>/dev/null; then
+        answer_callback "$callback_id" "$label"
+        clear_session_state "$sess" "$win"
+        [ -n "$cb_msg_id" ] && strip_buttons "$cb_msg_id"
+        log_event src bot event callback_ok action "$label" session "$sess" window "$win"
+    else
+        answer_callback "$callback_id" "Failed to send keys"
+        log_event src bot event callback_err action "$label" session "$sess" window "$win"
+    fi
+}
+
 handle_callback() {
     local callback_id="$1" data="$2" cb_msg_id="${3:-}"
     local action sess win opt_num
@@ -611,51 +633,9 @@ handle_callback() {
     IFS=':' read -r action sess win opt_num <<< "$data"
 
     case "$action" in
-        approve)
-            if ! check_target "$sess" "$win"; then
-                answer_callback "$callback_id" "$CHECK_ERR"
-                clear_session_state "$sess" "$win"
-                [ -n "$cb_msg_id" ] && strip_buttons "$cb_msg_id"
-                return
-            fi
-            if tmux send-keys -t "${sess}:${win}" "y" Enter 2>/dev/null; then
-                answer_callback "$callback_id" "Approved"
-                clear_session_state "$sess" "$win"
-                [ -n "$cb_msg_id" ] && strip_buttons "$cb_msg_id"
-            else
-                answer_callback "$callback_id" "Failed to send keys"
-            fi
-            ;;
-        deny)
-            if ! check_target "$sess" "$win"; then
-                answer_callback "$callback_id" "$CHECK_ERR"
-                clear_session_state "$sess" "$win"
-                [ -n "$cb_msg_id" ] && strip_buttons "$cb_msg_id"
-                return
-            fi
-            if tmux send-keys -t "${sess}:${win}" "n" Enter 2>/dev/null; then
-                answer_callback "$callback_id" "Denied"
-                clear_session_state "$sess" "$win"
-                [ -n "$cb_msg_id" ] && strip_buttons "$cb_msg_id"
-            else
-                answer_callback "$callback_id" "Failed to send keys"
-            fi
-            ;;
-        opt)
-            if ! check_target "$sess" "$win"; then
-                answer_callback "$callback_id" "$CHECK_ERR"
-                clear_session_state "$sess" "$win"
-                [ -n "$cb_msg_id" ] && strip_buttons "$cb_msg_id"
-                return
-            fi
-            if tmux send-keys -t "${sess}:${win}" "${opt_num}" 2>/dev/null; then
-                answer_callback "$callback_id" "Sent option ${opt_num}"
-                clear_session_state "$sess" "$win"
-                [ -n "$cb_msg_id" ] && strip_buttons "$cb_msg_id"
-            else
-                answer_callback "$callback_id" "Failed to send keys"
-            fi
-            ;;
+        approve) handle_action "$callback_id" "$sess" "$win" "y Enter" "Approved" "$cb_msg_id" ;;
+        deny)    handle_action "$callback_id" "$sess" "$win" "n Enter" "Denied" "$cb_msg_id" ;;
+        opt)     handle_action "$callback_id" "$sess" "$win" "$opt_num" "Sent option $opt_num" "$cb_msg_id" ;;
         view)
             answer_callback "$callback_id" ""
             if ! check_target "$sess" "$win"; then

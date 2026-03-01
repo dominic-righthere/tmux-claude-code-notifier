@@ -1276,11 +1276,129 @@ fi
 EVENTS_DB="${HOME}/.local/share/claude-notifier/events.db"
 
 # =============================================================================
+# Modular Pipeline & Button Fix Tests
+# =============================================================================
+printf "\n${YELLOW}=== Modular Pipeline & Button Fix Tests ===${NC}\n"
+
+# Test 104: telegram-send.sh has build_header function
+run_test
+if grep -q '^build_header()' ./telegram-send.sh; then
+    pass "telegram-send.sh has build_header function"
+else
+    fail "telegram-send.sh has build_header function"
+fi
+
+# Test 105: telegram-send.sh has build_body function
+run_test
+if grep -q '^build_body()' ./telegram-send.sh; then
+    pass "telegram-send.sh has build_body function"
+else
+    fail "telegram-send.sh has build_body function"
+fi
+
+# Test 106: telegram-send.sh has build_keyboard function
+run_test
+if grep -q '^build_keyboard()' ./telegram-send.sh; then
+    pass "telegram-send.sh has build_keyboard function"
+else
+    fail "telegram-send.sh has build_keyboard function"
+fi
+
+# Test 107: telegram-send.sh has send_or_edit function
+run_test
+if grep -q '^send_or_edit()' ./telegram-send.sh; then
+    pass "telegram-send.sh has send_or_edit function"
+else
+    fail "telegram-send.sh has send_or_edit function"
+fi
+
+# Test 108: build_keyboard scopes option regex to prompt block (after last ⏺)
+run_test
+# The awk in build_keyboard should scope to after last ⏺, not scan all raw_context
+if grep -A30 'build_keyboard()' ./telegram-send.sh | grep -q 'prompt_block'; then
+    pass "build_keyboard scopes option extraction to prompt block"
+else
+    fail "build_keyboard scopes option extraction to prompt block"
+fi
+
+# Test 109: build_keyboard caps at 4 option buttons max
+run_test
+if grep -A30 'build_keyboard()' ./telegram-send.sh | grep -q 'btn_count.*-ge 4'; then
+    pass "build_keyboard caps at 4 option buttons"
+else
+    fail "build_keyboard caps at 4 option buttons"
+fi
+
+# Test 110: build_keyboard puts each option button on its own row
+run_test
+# Each button should be wrapped in its own array: [btn] not [btn1,btn2,btn3]
+if grep -A40 'build_keyboard()' ./telegram-send.sh | grep -q 'option_rows.*\[${btn}\]'; then
+    pass "build_keyboard puts each option on its own row"
+else
+    fail "build_keyboard puts each option on its own row"
+fi
+
+# Test 111: msg_id file stores id:type format
+run_test
+if grep -q 'printf.*%s.*:.*TYPE.*MSG_ID_DIR' ./telegram-send.sh || \
+   grep -q '${new_msg_id}:${TYPE}' ./telegram-send.sh; then
+    pass "msg_id file stores id:type format"
+else
+    fail "msg_id file stores id:type format"
+fi
+
+# Test 112: send_or_edit skips editing when prev_type=waiting and TYPE=finished
+run_test
+if grep -q 'prev_type.*=.*waiting.*&&.*TYPE.*=.*finished' ./telegram-send.sh || \
+   grep -A5 'Type guard' ./telegram-send.sh | grep -q 'skip_edit'; then
+    pass "send_or_edit type guard: finished skips editing waiting"
+else
+    fail "send_or_edit type guard: finished skips editing waiting"
+fi
+
+# Test 113: telegram.sh has handle_action helper function
+run_test
+if grep -q '^handle_action()' ./telegram.sh; then
+    pass "telegram.sh has handle_action helper"
+else
+    fail "telegram.sh has handle_action helper"
+fi
+
+# Test 114: handle_callback uses handle_action for approve/deny/opt
+run_test
+approve_line="$(grep 'approve)' ./telegram.sh | grep 'handle_action' | head -1)"
+deny_line="$(grep 'deny)' ./telegram.sh | grep 'handle_action' | head -1)"
+opt_line="$(grep 'opt)' ./telegram.sh | grep 'handle_action' | head -1)"
+if [ -n "$approve_line" ] && [ -n "$deny_line" ] && [ -n "$opt_line" ]; then
+    pass "handle_callback uses handle_action for approve/deny/opt"
+else
+    fail "handle_callback uses handle_action for approve/deny/opt" \
+        "approve=$([[ -n "$approve_line" ]] && echo ok || echo missing) deny=$([[ -n "$deny_line" ]] && echo ok || echo missing) opt=$([[ -n "$opt_line" ]] && echo ok || echo missing)"
+fi
+
+# Test 115: handle_action logs callback results
+run_test
+if grep -A15 '^handle_action()' ./telegram.sh | grep -q 'log_event.*callback_ok' && \
+   grep -A15 '^handle_action()' ./telegram.sh | grep -q 'log_event.*callback_fail'; then
+    pass "handle_action logs callback results"
+else
+    fail "handle_action logs callback results"
+fi
+
+# Test 116: build_keyboard logs button count and style
+run_test
+if grep -q 'log_event.*event keyboard' ./telegram-send.sh && grep -q 'buttons=' ./telegram-send.sh; then
+    pass "build_keyboard logs button count and style"
+else
+    fail "build_keyboard logs button count and style"
+fi
+
+# =============================================================================
 # Char-Budget & Pipeline Tests
 # =============================================================================
 printf "\n${YELLOW}=== Char-Budget & Pipeline Tests ===${NC}\n"
 
-# Test 104: extract_prompt_text respects char budget on long input
+# Test 117: extract_prompt_text respects char budget on long input
 run_test
 long_lines=""
 for i in $(seq 1 50); do
@@ -1294,7 +1412,7 @@ else
     fail "extract_prompt_text respects char budget on long input" "Length: ${#result}, ends with ...: $(printf '%s' "$result" | tail -c 5)"
 fi
 
-# Test 105: extract_prompt_text returns full text when under budget
+# Test 118: extract_prompt_text returns full text when under budget
 run_test
 short_input="$(printf '⏺ A short message\n  Just a few words here\n❯ 1. Ok\n')"
 result="$(extract_prompt_text "$short_input" 1500)"
@@ -1304,7 +1422,7 @@ else
     fail "extract_prompt_text returns full text when under budget" "Got: '$result'"
 fi
 
-# Test 106: telegram-send.sh extracts before wrapping (wrap_long_lines after extract_prompt_text)
+# Test 119: telegram-send.sh extracts before wrapping (wrap_long_lines after extract_prompt_text)
 run_test
 # extract_prompt_text should use reflowed (not wrapped) text, then wrap_long_lines runs after
 extract_line="$(grep -n 'extract_prompt_text.*reflowed' ./telegram-send.sh | head -1 | cut -d: -f1)"
@@ -1315,7 +1433,7 @@ else
     fail "telegram-send.sh extracts before wrapping" "extract_line=$extract_line wrap_line=$wrap_line"
 fi
 
-# Test 107: notify.sh extracts prompt from UserPromptSubmit
+# Test 120: notify.sh extracts prompt from UserPromptSubmit
 run_test
 if sed -n '/UserPromptSubmit)/,/;;/p' ./notify.sh | grep -q 'extract_json_value.*prompt'; then
     pass "notify.sh extracts prompt from UserPromptSubmit"
