@@ -12,6 +12,7 @@ PID_FILE="${DATA_DIR}/telegram.pid"
 LOG_FILE="${DATA_DIR}/telegram.log"
 ACTIVE_DIR="${DATA_DIR}/active"
 NOTIF_DIR="${DATA_DIR}/notifications"
+MSG_ID_DIR="${DATA_DIR}/telegram_msg_ids"
 
 # Check dependencies
 for cmd in curl jq tmux; do
@@ -207,7 +208,7 @@ send_message() {
     # Convert literal \n to real newlines (bash string builders use \n)
     text="$(printf '%b' "$1")"
     local keyboard="${2:-}"
-    local data
+    local data response msg_id
 
     if [ -n "$keyboard" ]; then
         data="$(jq -n \
@@ -222,10 +223,54 @@ send_message() {
             '{chat_id: ($chat | tonumber), text: $text, parse_mode: "HTML"}')"
     fi
 
-    curl -s --max-time 10 \
+    response="$(curl -s --max-time 10 \
         -X POST "${API_BASE}/sendMessage" \
         -H "Content-Type: application/json" \
-        -d "$data" >/dev/null 2>&1 || true
+        -d "$data")" || response=""
+
+    # Return message_id via stdout
+    msg_id="$(printf '%s' "$response" | jq -r '.result.message_id // empty' 2>/dev/null)" || msg_id=""
+    printf '%s' "$msg_id"
+}
+
+edit_message() {
+    local msg_id="$1" text keyboard="${3:-}"
+    text="$(printf '%b' "$2")"
+    local data response
+
+    if [ -n "$keyboard" ]; then
+        data="$(jq -n \
+            --arg chat "$CHAT_ID" \
+            --arg msg_id "$msg_id" \
+            --arg text "$text" \
+            --argjson kb "$keyboard" \
+            '{chat_id: ($chat | tonumber), message_id: ($msg_id | tonumber), text: $text, parse_mode: "HTML", reply_markup: $kb}')"
+    else
+        data="$(jq -n \
+            --arg chat "$CHAT_ID" \
+            --arg msg_id "$msg_id" \
+            --arg text "$text" \
+            '{chat_id: ($chat | tonumber), message_id: ($msg_id | tonumber), text: $text, parse_mode: "HTML"}')"
+    fi
+
+    response="$(curl -s --max-time 10 \
+        -X POST "${API_BASE}/editMessageText" \
+        -H "Content-Type: application/json" \
+        -d "$data")" || response=""
+
+    local ok
+    ok="$(printf '%s' "$response" | jq -r '.ok // false' 2>/dev/null)" || ok="false"
+    [ "$ok" = "true" ]
+}
+
+strip_buttons() {
+    local msg_id="$1"
+    curl -s --max-time 10 \
+        -X POST "${API_BASE}/editMessageReplyMarkup" \
+        -H "Content-Type: application/json" \
+        -d "$(jq -n --arg chat "$CHAT_ID" --arg msg_id "$msg_id" \
+            '{chat_id: ($chat | tonumber), message_id: ($msg_id | tonumber), reply_markup: {inline_keyboard: []}}')" \
+        >/dev/null 2>&1 || true
 }
 
 answer_callback() {
@@ -236,6 +281,30 @@ answer_callback() {
         -H "Content-Type: application/json" \
         -d "$(jq -n --arg id "$callback_id" --arg text "$text" \
             '{callback_query_id: $id, text: $text}')" >/dev/null 2>&1 || true
+}
+
+# Check if a tmux session:window target exists
+# Returns 0 if valid, 1 if not (with specific error in CHECK_ERR)
+check_target() {
+    local sess="$1" win="$2"
+    CHECK_ERR=""
+    if ! tmux has-session -t "$sess" 2>/dev/null; then
+        CHECK_ERR="Session '${sess}' closed"
+        return 1
+    fi
+    if ! tmux display-message -t "${sess}:${win}" -p '' 2>/dev/null; then
+        CHECK_ERR="Window ${win} not found in '${sess}'"
+        return 1
+    fi
+    return 0
+}
+
+# Clear notification state + msg_id for a session key
+clear_session_state() {
+    local sess="$1" win="$2"
+    local key
+    key="$(sanitize_key "$sess")_${win}"
+    rm -f "${NOTIF_DIR}/${key}" "${MSG_ID_DIR}/${key}"
 }
 
 # ─── Command handlers ────────────────────────────────────────────────────────
@@ -256,13 +325,15 @@ cmd_help() {
 /doctor — Run diagnostics
 /help — This message
 MSG
-)"
+)" >/dev/null
 }
+
+LAST_SESSIONS_MSG_ID=""
 
 cmd_sessions() {
     build_session_list
     if [ "${#SESSION_LIST[@]}" -eq 0 ]; then
-        send_message "No active Claude Code sessions."
+        send_message "No active Claude Code sessions." >/dev/null
         return
     fi
 
@@ -300,16 +371,24 @@ cmd_sessions() {
             text="${text}\n     $(html_escape "$msg")"
         fi
 
+        # Button label: use project name if available, truncated to 12 chars
+        local btn_label="$idx"
+        if [ -n "$CTX_PROJECT" ]; then
+            local proj_short="$CTX_PROJECT"
+            [ "${#proj_short}" -gt 12 ] && proj_short="${proj_short:0:12}"
+            btn_label="$proj_short"
+        fi
+
         # Build keyboard row for this session
         local row=""
         if [ "$cat" = "waiting" ]; then
-            row="$(jq -n --arg idx "$idx" --arg s "$sess" --arg w "$win" \
-                '[{text: ("✅ " + $idx), callback_data: ("approve:" + $s + ":" + $w)},
-                  {text: ("❌ " + $idx), callback_data: ("deny:" + $s + ":" + $w)},
-                  {text: ("👁 " + $idx), callback_data: ("view:" + $s + ":" + $w)}]')"
+            row="$(jq -n --arg bl "$btn_label" --arg s "$sess" --arg w "$win" \
+                '[{text: ("✅ " + $bl), callback_data: ("approve:" + $s + ":" + $w)},
+                  {text: ("❌ " + $bl), callback_data: ("deny:" + $s + ":" + $w)},
+                  {text: ("👁 " + $bl), callback_data: ("view:" + $s + ":" + $w)}]')"
         else
-            row="$(jq -n --arg idx "$idx" --arg s "$sess" --arg w "$win" \
-                '[{text: ("👁 " + $idx + ". " + $s), callback_data: ("view:" + $s + ":" + $w)}]')"
+            row="$(jq -n --arg bl "$btn_label" --arg s "$sess" --arg w "$win" \
+                '[{text: ("👁 " + $bl), callback_data: ("view:" + $s + ":" + $w)}]')"
         fi
 
         if [ -n "$keyboard_rows" ]; then
@@ -324,14 +403,25 @@ cmd_sessions() {
     keyboard_rows="${keyboard_rows},${refresh_row}"
 
     local keyboard="{\"inline_keyboard\":[${keyboard_rows}]}"
-    send_message "$text" "$keyboard"
+
+    # Try edit-in-place if we have a previous sessions message
+    if [ -n "$LAST_SESSIONS_MSG_ID" ]; then
+        if edit_message "$LAST_SESSIONS_MSG_ID" "$text" "$keyboard"; then
+            return
+        fi
+    fi
+    LAST_SESSIONS_MSG_ID="$(send_message "$text" "$keyboard")"
 }
 
 cmd_view() {
     local num="$1"
     build_session_list
     if ! get_session "$num"; then
-        send_message "Session #${num} not found. Use /sessions to list."
+        send_message "Session #${num} not found. Use /sessions to list." >/dev/null
+        return
+    fi
+    if ! check_target "$S_SESS" "$S_WIN"; then
+        send_message "${CHECK_ERR}" >/dev/null
         return
     fi
     # Capture last 200 lines, strip ANSI, reflow for phone readability
@@ -340,13 +430,13 @@ cmd_view() {
     output="$(tmux capture-pane -t "${S_SESS}:${S_WIN}" -J -p -S -200 2>/dev/null \
         | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' | reflow_for_telegram "$rw" \
         | convert_tables_to_bullets | wrap_long_lines 50)" || {
-        send_message "Could not capture output from ${S_SESS}:${S_WIN}"
+        send_message "Could not capture output from ${S_SESS}:${S_WIN}" >/dev/null
         return
     }
     # Trim trailing blank lines
     output="$(printf '%s' "$output" | trim_blank_lines)"
     if [ -z "$output" ]; then
-        send_message "<b>${S_SESS}:${S_WIN}</b>\n\n(empty)"
+        send_message "<b>${S_SESS}:${S_WIN}</b>\n\n(empty)" >/dev/null
         return
     fi
 
@@ -373,7 +463,7 @@ cmd_view() {
 
 ${preview_escaped}
 
-<blockquote expandable>${output_escaped}</blockquote>"
+<blockquote expandable>${output_escaped}</blockquote>" >/dev/null
 }
 
 cmd_send() {
@@ -382,40 +472,60 @@ cmd_send() {
     local msg="$*"
     build_session_list
     if ! get_session "$num"; then
-        send_message "Session #${num} not found."
+        send_message "Session #${num} not found." >/dev/null
         return
     fi
     if [ -z "$msg" ]; then
-        send_message "Usage: /send &lt;n&gt; &lt;message&gt;"
+        send_message "Usage: /send &lt;n&gt; &lt;message&gt;" >/dev/null
+        return
+    fi
+    if ! check_target "$S_SESS" "$S_WIN"; then
+        send_message "${CHECK_ERR}" >/dev/null
         return
     fi
     tmux send-keys -t "${S_SESS}:${S_WIN}" "$msg" Enter 2>/dev/null && \
-        send_message "Sent to ${S_SESS}:${S_WIN}" || \
-        send_message "Failed to send to ${S_SESS}:${S_WIN}"
+        send_message "Sent to ${S_SESS}:${S_WIN}" >/dev/null || \
+        send_message "Failed to send to ${S_SESS}:${S_WIN}" >/dev/null
 }
 
 cmd_approve() {
     local num="$1"
     build_session_list
     if ! get_session "$num"; then
-        send_message "Session #${num} not found."
+        send_message "Session #${num} not found." >/dev/null
         return
     fi
-    tmux send-keys -t "${S_SESS}:${S_WIN}" "y" Enter 2>/dev/null && \
-        send_message "✅ Approved ${S_SESS}:${S_WIN}" || \
-        send_message "Failed to approve ${S_SESS}:${S_WIN}"
+    if ! check_target "$S_SESS" "$S_WIN"; then
+        send_message "${CHECK_ERR}" >/dev/null
+        clear_session_state "$S_SESS" "$S_WIN"
+        return
+    fi
+    if tmux send-keys -t "${S_SESS}:${S_WIN}" "y" Enter 2>/dev/null; then
+        send_message "✅ Approved ${S_SESS}:${S_WIN}" >/dev/null
+        clear_session_state "$S_SESS" "$S_WIN"
+    else
+        send_message "Failed to approve ${S_SESS}:${S_WIN}" >/dev/null
+    fi
 }
 
 cmd_deny() {
     local num="$1"
     build_session_list
     if ! get_session "$num"; then
-        send_message "Session #${num} not found."
+        send_message "Session #${num} not found." >/dev/null
         return
     fi
-    tmux send-keys -t "${S_SESS}:${S_WIN}" "n" Enter 2>/dev/null && \
-        send_message "❌ Denied ${S_SESS}:${S_WIN}" || \
-        send_message "Failed to deny ${S_SESS}:${S_WIN}"
+    if ! check_target "$S_SESS" "$S_WIN"; then
+        send_message "${CHECK_ERR}" >/dev/null
+        clear_session_state "$S_SESS" "$S_WIN"
+        return
+    fi
+    if tmux send-keys -t "${S_SESS}:${S_WIN}" "n" Enter 2>/dev/null; then
+        send_message "❌ Denied ${S_SESS}:${S_WIN}" >/dev/null
+        clear_session_state "$S_SESS" "$S_WIN"
+    else
+        send_message "Failed to deny ${S_SESS}:${S_WIN}" >/dev/null
+    fi
 }
 
 cmd_run() {
@@ -424,21 +534,25 @@ cmd_run() {
     local run_cmd="$*"
     build_session_list
     if ! get_session "$num"; then
-        send_message "Session #${num} not found."
+        send_message "Session #${num} not found." >/dev/null
         return
     fi
     if [ -z "$run_cmd" ]; then
-        send_message "Usage: /run &lt;n&gt; &lt;command&gt;"
+        send_message "Usage: /run &lt;n&gt; &lt;command&gt;" >/dev/null
+        return
+    fi
+    if ! check_target "$S_SESS" "$S_WIN"; then
+        send_message "${CHECK_ERR}" >/dev/null
         return
     fi
     # Create a new window adjacent to the target, run command, capture output
     local new_win
     new_win="$(tmux new-window -t "${S_SESS}" -a -P -F '#{window_index}' 2>/dev/null)" || {
-        send_message "Failed to create window in ${S_SESS}"
+        send_message "Failed to create window in ${S_SESS}" >/dev/null
         return
     }
     tmux send-keys -t "${S_SESS}:${new_win}" "$run_cmd" Enter 2>/dev/null
-    send_message "Running in ${S_SESS}:${new_win}...\n$(html_escape "$run_cmd")"
+    send_message "Running in ${S_SESS}:${new_win}...\n$(html_escape "$run_cmd")" >/dev/null
 
     # Wait for command to produce output, then capture
     sleep 2
@@ -451,7 +565,7 @@ cmd_run() {
         if [ "${#output}" -gt 3800 ]; then
             output="...${output:$((${#output} - 3800))}"
         fi
-        send_message "<b>Output from ${S_SESS}:${new_win}</b>\n\n$(html_escape "$output")"
+        send_message "<b>Output from ${S_SESS}:${new_win}</b>\n\n$(html_escape "$output")" >/dev/null
     fi
 }
 
@@ -464,7 +578,7 @@ cmd_doctor() {
     if [ "${#output}" -gt 3800 ]; then
         output="...${output:$((${#output} - 3800))}"
     fi
-    send_message "<pre>$(html_escape "$output")</pre>"
+    send_message "<pre>$(html_escape "$output")</pre>" >/dev/null
 }
 
 cmd_restart() {
@@ -472,9 +586,9 @@ cmd_restart() {
     local args="--yes"
     if [ -n "$version" ]; then
         args="$args --version $version"
-        send_message "Restarting all Claude Code sessions (installing v${version})..."
+        send_message "Restarting all Claude Code sessions (installing v${version})..." >/dev/null
     else
-        send_message "Restarting all Claude Code sessions..."
+        send_message "Restarting all Claude Code sessions..." >/dev/null
     fi
     local output
     output="$("${SCRIPT_DIR}/restart.sh" $args 2>&1)" || true
@@ -485,35 +599,69 @@ cmd_restart() {
     if [ "${#output}" -gt 3800 ]; then
         output="...${output:$((${#output} - 3800))}"
     fi
-    send_message "<pre>$(html_escape "$output")</pre>"
+    send_message "<pre>$(html_escape "$output")</pre>" >/dev/null
 }
 
 # ─── Callback handler (inline keyboard buttons) ──────────────────────────────
 
 handle_callback() {
-    local callback_id="$1" data="$2"
+    local callback_id="$1" data="$2" cb_msg_id="${3:-}"
     local action sess win opt_num
 
     IFS=':' read -r action sess win opt_num <<< "$data"
 
     case "$action" in
         approve)
-            tmux send-keys -t "${sess}:${win}" "y" Enter 2>/dev/null && \
-                answer_callback "$callback_id" "Approved" || \
-                answer_callback "$callback_id" "Failed"
+            if ! check_target "$sess" "$win"; then
+                answer_callback "$callback_id" "$CHECK_ERR"
+                clear_session_state "$sess" "$win"
+                [ -n "$cb_msg_id" ] && strip_buttons "$cb_msg_id"
+                return
+            fi
+            if tmux send-keys -t "${sess}:${win}" "y" Enter 2>/dev/null; then
+                answer_callback "$callback_id" "Approved"
+                clear_session_state "$sess" "$win"
+                [ -n "$cb_msg_id" ] && strip_buttons "$cb_msg_id"
+            else
+                answer_callback "$callback_id" "Failed to send keys"
+            fi
             ;;
         deny)
-            tmux send-keys -t "${sess}:${win}" "n" Enter 2>/dev/null && \
-                answer_callback "$callback_id" "Denied" || \
-                answer_callback "$callback_id" "Failed"
+            if ! check_target "$sess" "$win"; then
+                answer_callback "$callback_id" "$CHECK_ERR"
+                clear_session_state "$sess" "$win"
+                [ -n "$cb_msg_id" ] && strip_buttons "$cb_msg_id"
+                return
+            fi
+            if tmux send-keys -t "${sess}:${win}" "n" Enter 2>/dev/null; then
+                answer_callback "$callback_id" "Denied"
+                clear_session_state "$sess" "$win"
+                [ -n "$cb_msg_id" ] && strip_buttons "$cb_msg_id"
+            else
+                answer_callback "$callback_id" "Failed to send keys"
+            fi
             ;;
         opt)
-            tmux send-keys -t "${sess}:${win}" "${opt_num}" 2>/dev/null && \
-                answer_callback "$callback_id" "Sent option ${opt_num}" || \
-                answer_callback "$callback_id" "Failed"
+            if ! check_target "$sess" "$win"; then
+                answer_callback "$callback_id" "$CHECK_ERR"
+                clear_session_state "$sess" "$win"
+                [ -n "$cb_msg_id" ] && strip_buttons "$cb_msg_id"
+                return
+            fi
+            if tmux send-keys -t "${sess}:${win}" "${opt_num}" 2>/dev/null; then
+                answer_callback "$callback_id" "Sent option ${opt_num}"
+                clear_session_state "$sess" "$win"
+                [ -n "$cb_msg_id" ] && strip_buttons "$cb_msg_id"
+            else
+                answer_callback "$callback_id" "Failed to send keys"
+            fi
             ;;
         view)
             answer_callback "$callback_id" ""
+            if ! check_target "$sess" "$win"; then
+                send_message "<b>${sess}:${win}</b>\n\n${CHECK_ERR}" >/dev/null
+                return
+            fi
             local rw="${REFLOW_WIDTH:-$(tmux display-message -t "${sess}:${win}" -p '#{pane_width}' 2>/dev/null || echo 120)}"
             local output
             output="$(tmux capture-pane -t "${sess}:${win}" -J -p -S -200 2>/dev/null \
@@ -521,7 +669,7 @@ handle_callback() {
                 | convert_tables_to_bullets | wrap_long_lines 50)" || output="(could not capture)"
             output="$(printf '%s' "$output" | trim_blank_lines)"
             if [ -z "$output" ]; then
-                send_message "<b>${sess}:${win}</b>\n\n(empty)"
+                send_message "<b>${sess}:${win}</b>\n\n(empty)" >/dev/null
             else
                 # Compact header: session · project
                 get_session_info "$sess" "$win"
@@ -544,7 +692,7 @@ handle_callback() {
 
 ${cb_preview_escaped}
 
-<blockquote expandable>${cb_output_escaped}</blockquote>"
+<blockquote expandable>${cb_output_escaped}</blockquote>" >/dev/null >/dev/null
             fi
             ;;
         sessions)
@@ -582,14 +730,14 @@ dispatch_message() {
             ;;
         /v)
             if [ -z "$args" ]; then
-                send_message "Usage: /v &lt;n&gt;"
+                send_message "Usage: /v &lt;n&gt;" >/dev/null
                 return
             fi
             cmd_view "${args%% *}"
             ;;
         /send)
             if [ -z "$args" ]; then
-                send_message "Usage: /send &lt;n&gt; &lt;message&gt;"
+                send_message "Usage: /send &lt;n&gt; &lt;message&gt;" >/dev/null
                 return
             fi
             local num="${args%% *}"
@@ -599,21 +747,21 @@ dispatch_message() {
             ;;
         /a)
             if [ -z "$args" ]; then
-                send_message "Usage: /a &lt;n&gt;"
+                send_message "Usage: /a &lt;n&gt;" >/dev/null
                 return
             fi
             cmd_approve "${args%% *}"
             ;;
         /d)
             if [ -z "$args" ]; then
-                send_message "Usage: /d &lt;n&gt;"
+                send_message "Usage: /d &lt;n&gt;" >/dev/null
                 return
             fi
             cmd_deny "${args%% *}"
             ;;
         /run)
             if [ -z "$args" ]; then
-                send_message "Usage: /run &lt;n&gt; &lt;command&gt;"
+                send_message "Usage: /run &lt;n&gt; &lt;command&gt;" >/dev/null
                 return
             fi
             local num="${args%% *}"
@@ -628,7 +776,7 @@ dispatch_message() {
             cmd_doctor
             ;;
         *)
-            send_message "Unknown command. Type /help for available commands."
+            send_message "Unknown command. Type /help for available commands." >/dev/null
             ;;
     esac
 }
@@ -643,7 +791,12 @@ cmd_run_daemon() {
         tmp="$(tail -200 "$LOG_FILE")"
         printf '%s\n' "$tmp" > "$LOG_FILE"
     fi
+    # Initialize events database and prune old entries
+    init_events_db
+    sqlite3 "$EVENTS_DB" "DELETE FROM events WHERE ts < datetime('now', '-7 days', 'localtime');" 2>/dev/null || true
+
     printf '[%s] Telegram bot started (PID %d)\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$$"
+    log_event src bot event start message "PID $$"
 
     # Register bot command menu with Telegram
     curl -s --max-time 10 \
@@ -666,13 +819,13 @@ cmd_run_daemon() {
     # Notify that bot has started + run doctor
     local ver=""
     [ -f "${SCRIPT_DIR}/VERSION" ] && ver=" v$(<"${SCRIPT_DIR}/VERSION")" && ver="${ver%$'\n'}"
-    send_message "Bot started${ver}"
+    send_message "Bot started${ver}" >/dev/null
     cmd_doctor
 
     local offset=0
 
     # Clean shutdown on signals
-    trap 'printf "[%s] Bot stopping\n" "$(date "+%Y-%m-%d %H:%M:%S")"; exit 0' INT TERM
+    trap 'log_event src bot event stop; printf "[%s] Bot stopping\n" "$(date "+%Y-%m-%d %H:%M:%S")"; exit 0' INT TERM
 
     while true; do
         local url="${API_BASE}/getUpdates?timeout=30&offset=${offset}"
@@ -703,13 +856,19 @@ cmd_run_daemon() {
             fi
 
             # Check for callback query (inline keyboard button press)
-            local callback_id callback_data callback_chat
+            local callback_id callback_data callback_chat callback_msg_id
             callback_id="$(printf '%s' "$update" | jq -r '.callback_query.id // empty' 2>/dev/null)"
             if [ -n "$callback_id" ]; then
                 callback_chat="$(printf '%s' "$update" | jq -r '.callback_query.from.id // empty' 2>/dev/null)"
                 if [ "$callback_chat" = "$CHAT_ID" ]; then
                     callback_data="$(printf '%s' "$update" | jq -r '.callback_query.data // empty' 2>/dev/null)"
-                    [ -n "$callback_data" ] && handle_callback "$callback_id" "$callback_data"
+                    callback_msg_id="$(printf '%s' "$update" | jq -r '.callback_query.message.message_id // empty' 2>/dev/null)"
+                    if [ -n "$callback_data" ]; then
+                        local cb_action cb_sess cb_win
+                        IFS=':' read -r cb_action cb_sess cb_win _ <<< "$callback_data"
+                        log_event src bot event callback action "$cb_action" session "$cb_sess" window "$cb_win" msg_id "$callback_msg_id"
+                        handle_callback "$callback_id" "$callback_data" "$callback_msg_id"
+                    fi
                 fi
                 i=$((i + 1))
                 continue
@@ -726,6 +885,7 @@ cmd_run_daemon() {
             # Security: validate sender
             if [ "$from_id" != "$CHAT_ID" ]; then
                 printf '[%s] Rejected message from unauthorized user: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$from_id"
+                log_event src bot event rejected message "$from_id"
                 i=$((i + 1))
                 continue
             fi
@@ -733,6 +893,7 @@ cmd_run_daemon() {
             msg_text="$(printf '%s' "$update" | jq -r '.message.text // empty' 2>/dev/null)"
             if [ -n "$msg_text" ]; then
                 printf '[%s] Command: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$msg_text"
+                log_event src bot event command message "$msg_text"
                 dispatch_message "$msg_text"
             fi
 

@@ -7,7 +7,9 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/lib.sh"
-CONFIG_FILE="${HOME}/.local/share/claude-notifier/telegram.conf"
+DATA_DIR="${HOME}/.local/share/claude-notifier"
+CONFIG_FILE="${DATA_DIR}/telegram.conf"
+MSG_ID_DIR="${DATA_DIR}/telegram_msg_ids"
 
 # Exit silently if not configured
 [ -f "$CONFIG_FILE" ] || exit 0
@@ -33,6 +35,12 @@ case "$TYPE" in
 esac
 
 API_BASE="https://api.telegram.org/bot${BOT_TOKEN}"
+mkdir -p "$MSG_ID_DIR"
+
+SAFE_SESSION="$(sanitize_key "$SESSION")"
+MSG_KEY="${SAFE_SESSION}_${WINDOW}"
+
+log_event src send event dispatch type "$TYPE" session "$SESSION" window "$WINDOW" tool "$TOOL_NAME"
 
 # Get project name from pane current path
 project_name=""
@@ -200,8 +208,39 @@ else
     }')"
 fi
 
-# Send notification
-curl -s --max-time 10 \
+# Edit-or-send: try editing previous message for this session, fall back to new message
+send_result=""
+prev_msg_id=""
+[ -f "${MSG_ID_DIR}/${MSG_KEY}" ] && prev_msg_id="$(<"${MSG_ID_DIR}/${MSG_KEY}")"
+
+if [ -n "$prev_msg_id" ]; then
+    # Try to edit the previous message in-place
+    edit_response="$(curl -s --max-time 10 \
+        -X POST "${API_BASE}/editMessageText" \
+        -H "Content-Type: application/json" \
+        -d "$(jq -n \
+            --arg chat "$CHAT_ID" \
+            --arg msg_id "$prev_msg_id" \
+            --arg text "$text" \
+            --argjson keyboard "$keyboard" \
+            '{
+                chat_id: ($chat | tonumber),
+                message_id: ($msg_id | tonumber),
+                text: $text,
+                parse_mode: "HTML",
+                reply_markup: $keyboard
+            }')")" || edit_response=""
+
+    edit_ok="$(printf '%s' "$edit_response" | jq -r '.ok // false' 2>/dev/null)" || edit_ok="false"
+    if [ "$edit_ok" = "true" ]; then
+        log_event src send event edit type "$TYPE" session "$SESSION" window "$WINDOW" msg_id "$prev_msg_id" text "$text"
+        exit 0
+    fi
+    log_event src send event edit_fail type "$TYPE" session "$SESSION" window "$WINDOW" msg_id "$prev_msg_id"
+fi
+
+# Send new message
+send_result="$(curl -s --max-time 10 \
     -X POST "${API_BASE}/sendMessage" \
     -H "Content-Type: application/json" \
     -d "$(jq -n \
@@ -213,4 +252,13 @@ curl -s --max-time 10 \
             text: $text,
             parse_mode: "HTML",
             reply_markup: $keyboard
-        }')" >/dev/null 2>&1 || true
+        }')")" || send_result=""
+
+# Extract and store message_id for future edits
+new_msg_id="$(printf '%s' "$send_result" | jq -r '.result.message_id // empty' 2>/dev/null)" || new_msg_id=""
+if [ -n "$new_msg_id" ]; then
+    printf '%s' "$new_msg_id" > "${MSG_ID_DIR}/${MSG_KEY}"
+    log_event src send event new type "$TYPE" session "$SESSION" window "$WINDOW" msg_id "$new_msg_id" text "$text"
+else
+    log_event src send event send_fail type "$TYPE" session "$SESSION" window "$WINDOW"
+fi

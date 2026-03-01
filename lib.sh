@@ -2,6 +2,53 @@
 # Claude Code Notifier — shared library
 # Source this from other scripts: source "${SCRIPT_DIR}/lib.sh"
 
+# ─── Event logging (SQLite) ──────────────────────────────────────────────────
+
+EVENTS_DB="${HOME}/.local/share/claude-notifier/events.db"
+
+init_events_db() {
+    [ -f "$EVENTS_DB" ] && return 0
+    mkdir -p "$(dirname "$EVENTS_DB")"
+    sqlite3 "$EVENTS_DB" <<'SQL' >/dev/null
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now','localtime')),
+    src TEXT NOT NULL,
+    event TEXT NOT NULL,
+    session TEXT,
+    window TEXT,
+    type TEXT,
+    tool TEXT,
+    action TEXT,
+    msg_id TEXT,
+    message TEXT,
+    text TEXT,
+    extra TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
+CREATE INDEX IF NOT EXISTS idx_events_session ON events(session, window);
+PRAGMA journal_mode=WAL;
+SQL
+}
+
+# log_event key val key val ...
+# Builds INSERT from key-value pairs. Silently no-ops if DB missing or sqlite3 fails.
+log_event() {
+    [ -f "$EVENTS_DB" ] || return 0
+    local cols="ts" vals="strftime('%Y-%m-%dT%H:%M:%S','now','localtime')"
+    local _q="'"
+    while [ $# -ge 2 ]; do
+        cols="${cols},${1}"
+        local v="$2"
+        v="${v//$_q/$_q$_q}"
+        vals="${vals},'${v}'"
+        shift 2
+    done
+    sqlite3 "$EVENTS_DB" "INSERT INTO events(${cols}) VALUES(${vals});" 2>/dev/null || true
+}
+
+# ─── Utilities ────────────────────────────────────────────────────────────────
+
 # Sanitize a tmux session name for use as a filename
 # Usage: sanitize_key "my session/name"
 sanitize_key() {

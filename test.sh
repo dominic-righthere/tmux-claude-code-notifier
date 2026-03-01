@@ -635,15 +635,15 @@ fi
 # =============================================================================
 printf "\n${YELLOW}=== Telegram Send Tests ===${NC}\n"
 
-# Test 41: telegram-send.sh does NOT use editMessageText (dedup removed)
+# Test 41: telegram-send.sh uses editMessageText for edit-in-place
 run_test
-if ! grep -q 'editMessageText' ./telegram-send.sh; then
-    pass "telegram-send.sh has no editMessageText (dedup removed)"
+if grep -q 'editMessageText' ./telegram-send.sh; then
+    pass "telegram-send.sh uses editMessageText (edit-in-place)"
 else
-    fail "telegram-send.sh has no editMessageText (dedup removed)"
+    fail "telegram-send.sh uses editMessageText (edit-in-place)"
 fi
 
-# Test 42: telegram-send.sh uses sendMessage directly
+# Test 42: telegram-send.sh uses sendMessage as fallback
 run_test
 if grep -q 'sendMessage' ./telegram-send.sh; then
     pass "telegram-send.sh uses sendMessage"
@@ -965,6 +965,315 @@ if ! grep -q 'mv.*LOG_FILE' ./telegram.sh; then
 else
     fail "telegram.sh log truncation preserves inode" "Found mv...LOG_FILE pattern — creates new inode"
 fi
+
+# =============================================================================
+# Telegram UX Fix Tests
+# =============================================================================
+printf "\n${YELLOW}=== Telegram UX Fix Tests ===${NC}\n"
+
+# Test 73: telegram-send.sh has outgoing message logging (via log_event)
+run_test
+if grep -q 'log_event' ./telegram-send.sh; then
+    pass "telegram-send.sh has outgoing message logging (log_event)"
+else
+    fail "telegram-send.sh has outgoing message logging (log_event)"
+fi
+
+# Test 74: telegram-send.sh tracks msg_ids in telegram_msg_ids directory
+run_test
+if grep -q 'MSG_ID_DIR' ./telegram-send.sh && grep -q 'telegram_msg_ids' ./telegram-send.sh; then
+    pass "telegram-send.sh tracks msg_ids"
+else
+    fail "telegram-send.sh tracks msg_ids"
+fi
+
+# Test 75: telegram.sh has check_target helper
+run_test
+if grep -q 'check_target()' ./telegram.sh && grep -q 'CHECK_ERR' ./telegram.sh; then
+    pass "telegram.sh has check_target helper"
+else
+    fail "telegram.sh has check_target helper"
+fi
+
+# Test 76: telegram.sh has strip_buttons function
+run_test
+if grep -q 'strip_buttons()' ./telegram.sh && grep -q 'editMessageReplyMarkup' ./telegram.sh; then
+    pass "telegram.sh has strip_buttons function"
+else
+    fail "telegram.sh has strip_buttons function"
+fi
+
+# Test 77: telegram.sh has edit_message function
+run_test
+if grep -q 'edit_message()' ./telegram.sh && grep -q 'editMessageText' ./telegram.sh; then
+    pass "telegram.sh has edit_message function"
+else
+    fail "telegram.sh has edit_message function"
+fi
+
+# Test 78: telegram.sh clears notification state on approve/deny callbacks
+run_test
+if grep -q 'clear_session_state' ./telegram.sh; then
+    count=$(grep -c 'clear_session_state' ./telegram.sh)
+    if [ "$count" -ge 6 ]; then
+        pass "telegram.sh clears state on approve/deny ($count calls)"
+    else
+        fail "telegram.sh clears state on approve/deny" "Only $count clear_session_state calls, expected >= 6"
+    fi
+else
+    fail "telegram.sh clears state on approve/deny" "No clear_session_state found"
+fi
+
+# Test 79: telegram.sh strips buttons after approve/deny callback
+run_test
+if grep -q 'strip_buttons.*cb_msg_id' ./telegram.sh; then
+    pass "telegram.sh strips buttons after approve/deny"
+else
+    fail "telegram.sh strips buttons after approve/deny"
+fi
+
+# Test 80: telegram.sh sessions edit-in-place with LAST_SESSIONS_MSG_ID
+run_test
+if grep -q 'LAST_SESSIONS_MSG_ID' ./telegram.sh && grep -q 'edit_message.*LAST_SESSIONS' ./telegram.sh; then
+    pass "telegram.sh sessions edit-in-place"
+else
+    fail "telegram.sh sessions edit-in-place"
+fi
+
+# Test 81: notify.sh cleans up telegram_msg_ids on UserPromptSubmit
+run_test
+if grep -q 'MSG_ID_DIR' ./notify.sh && grep 'UserPromptSubmit' -A3 ./notify.sh | grep -q 'MSG_ID_DIR'; then
+    pass "notify.sh cleans up msg_ids on UserPromptSubmit"
+else
+    fail "notify.sh cleans up msg_ids on UserPromptSubmit"
+fi
+
+# Test 82: notify.sh cleans up telegram_msg_ids on SessionEnd
+run_test
+if grep 'SessionEnd' -A3 ./notify.sh | grep -q 'MSG_ID_DIR'; then
+    pass "notify.sh cleans up msg_ids on SessionEnd"
+else
+    fail "notify.sh cleans up msg_ids on SessionEnd"
+fi
+
+# Test 83: install.sh creates telegram_msg_ids directory
+run_test
+if grep -q 'telegram_msg_ids' ./install.sh; then
+    pass "install.sh creates telegram_msg_ids directory"
+else
+    fail "install.sh creates telegram_msg_ids directory"
+fi
+
+# Test 84: telegram.sh send_message returns message_id
+run_test
+if grep -A5 'send_message()' ./telegram.sh | grep -q 'msg_id'; then
+    pass "telegram.sh send_message returns message_id"
+else
+    fail "telegram.sh send_message returns message_id"
+fi
+
+# Test 85: telegram.sh handle_callback accepts 3rd parameter (cb_msg_id)
+run_test
+if grep -q 'cb_msg_id=.*{3:-}' ./telegram.sh; then
+    pass "telegram.sh handle_callback accepts cb_msg_id parameter"
+else
+    fail "telegram.sh handle_callback accepts cb_msg_id parameter"
+fi
+
+# Test 86: telegram.sh extracts callback_query.message.message_id in polling loop
+run_test
+if grep -q 'callback_msg_id' ./telegram.sh && grep -q 'callback_query.message.message_id' ./telegram.sh; then
+    pass "telegram.sh extracts callback message_id in polling loop"
+else
+    fail "telegram.sh extracts callback message_id in polling loop"
+fi
+
+# Test 87: telegram.sh uses check_target in cmd_view
+run_test
+if sed -n '/^cmd_view/,/^cmd_send/p' ./telegram.sh | grep -q 'check_target'; then
+    pass "telegram.sh uses check_target in cmd_view"
+else
+    fail "telegram.sh uses check_target in cmd_view"
+fi
+
+# Test 88: telegram.sh uses check_target in cmd_send
+run_test
+if sed -n '/^cmd_send/,/^cmd_approve/p' ./telegram.sh | grep -q 'check_target'; then
+    pass "telegram.sh uses check_target in cmd_send"
+else
+    fail "telegram.sh uses check_target in cmd_send"
+fi
+
+# Test 89: telegram.sh uses check_target in cmd_run
+run_test
+if sed -n '/^cmd_run/,/^cmd_doctor/p' ./telegram.sh | grep -q 'check_target'; then
+    pass "telegram.sh uses check_target in cmd_run"
+else
+    fail "telegram.sh uses check_target in cmd_run"
+fi
+
+# =============================================================================
+# Event Logging Tests (SQLite)
+# =============================================================================
+printf "\n${YELLOW}=== Event Logging Tests ===${NC}\n"
+
+# Test 90: init_events_db creates the database and table
+run_test
+TEST_EVENTS_DB="${TEST_DATA_DIR}/test_events.db"
+EVENTS_DB="$TEST_EVENTS_DB"
+rm -f "$TEST_EVENTS_DB"
+init_events_db
+if [ -f "$TEST_EVENTS_DB" ]; then
+    table_exists="$(sqlite3 "$TEST_EVENTS_DB" "SELECT name FROM sqlite_master WHERE type='table' AND name='events';" 2>/dev/null)"
+    if [ "$table_exists" = "events" ]; then
+        pass "init_events_db creates database and table"
+    else
+        fail "init_events_db creates database and table" "Table 'events' not found"
+    fi
+else
+    fail "init_events_db creates database and table" "Database file not created"
+fi
+
+# Test 91: init_events_db is idempotent (second call succeeds)
+run_test
+init_events_db
+if [ $? -eq 0 ]; then
+    pass "init_events_db is idempotent"
+else
+    fail "init_events_db is idempotent"
+fi
+
+# Test 92: log_event inserts a row with correct fields
+run_test
+log_event src hook event SessionStart session "my-sess" window "0"
+row="$(sqlite3 "$TEST_EVENTS_DB" "SELECT src, event, session, window FROM events ORDER BY id DESC LIMIT 1;" 2>/dev/null)"
+if [ "$row" = "hook|SessionStart|my-sess|0" ]; then
+    pass "log_event inserts row with correct fields"
+else
+    fail "log_event inserts row with correct fields" "Got: '$row'"
+fi
+
+# Test 93: log_event handles single quotes in values (SQL escaping)
+run_test
+log_event src send event new message "it's a test" text "User said 'hello' and \"bye\""
+row="$(sqlite3 "$TEST_EVENTS_DB" "SELECT message FROM events ORDER BY id DESC LIMIT 1;" 2>/dev/null)"
+if [ "$row" = "it's a test" ]; then
+    pass "log_event handles single quotes in values"
+else
+    fail "log_event handles single quotes in values" "Got: '$row'"
+fi
+
+# Test 94: log_event handles newlines in text field
+run_test
+log_event src send event new text "line1
+line2
+line3"
+row="$(sqlite3 "$TEST_EVENTS_DB" "SELECT length(text) > 10 FROM events ORDER BY id DESC LIMIT 1;" 2>/dev/null)"
+if [ "$row" = "1" ]; then
+    pass "log_event handles newlines in text field"
+else
+    fail "log_event handles newlines in text field" "Got: '$row'"
+fi
+
+# Test 95: log_event generates timestamp automatically
+run_test
+log_event src bot event start
+ts="$(sqlite3 "$TEST_EVENTS_DB" "SELECT ts FROM events ORDER BY id DESC LIMIT 1;" 2>/dev/null)"
+if [[ "$ts" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]; then
+    pass "log_event generates ISO timestamp"
+else
+    fail "log_event generates ISO timestamp" "Got: '$ts'"
+fi
+
+# Test 96: log_event silently no-ops when DB is missing
+run_test
+EVENTS_DB="${TEST_DATA_DIR}/nonexistent/missing.db"
+log_event src hook event test
+exit_code=$?
+EVENTS_DB="$TEST_EVENTS_DB"
+if [ "$exit_code" -eq 0 ]; then
+    pass "log_event no-ops when DB is missing"
+else
+    fail "log_event no-ops when DB is missing" "Exit code: $exit_code"
+fi
+
+# Test 97: WAL mode is enabled
+run_test
+journal="$(sqlite3 "$TEST_EVENTS_DB" "PRAGMA journal_mode;" 2>/dev/null)"
+if [ "$journal" = "wal" ]; then
+    pass "WAL mode is enabled"
+else
+    fail "WAL mode is enabled" "Got: '$journal'"
+fi
+
+# Test 98: notify.sh has log_event in all 7 event branches
+run_test
+log_count=0
+for hook in SessionStart SessionEnd UserPromptSubmit PreToolUse Stop Notification PermissionRequest; do
+    # Check that the case block for this hook contains log_event
+    if sed -n "/${hook})/,/;;/p" ./notify.sh | grep -q 'log_event'; then
+        log_count=$((log_count + 1))
+    fi
+done
+if [ "$log_count" -eq 7 ]; then
+    pass "notify.sh has log_event in all 7 event branches"
+else
+    fail "notify.sh has log_event in all 7 event branches" "Found $log_count, expected 7"
+fi
+
+# Test 99: telegram-send.sh uses log_event (not old log function)
+run_test
+if grep -q 'log_event' ./telegram-send.sh && ! grep -q '^log()' ./telegram-send.sh; then
+    pass "telegram-send.sh uses log_event (old log removed)"
+else
+    fail "telegram-send.sh uses log_event (old log removed)"
+fi
+
+# Test 100: telegram.sh uses log_event
+run_test
+if grep -q 'log_event' ./telegram.sh; then
+    tg_log_count=$(grep -c 'log_event' ./telegram.sh)
+    if [ "$tg_log_count" -ge 4 ]; then
+        pass "telegram.sh uses log_event ($tg_log_count calls)"
+    else
+        fail "telegram.sh uses log_event" "Only $tg_log_count calls, expected >= 4"
+    fi
+else
+    fail "telegram.sh uses log_event" "No log_event found"
+fi
+
+# Test 101: telegram.sh initializes events DB in cmd_run_daemon
+run_test
+if sed -n '/^cmd_run_daemon/,/^}/p' ./telegram.sh | grep -q 'init_events_db'; then
+    pass "telegram.sh initializes events DB on daemon start"
+else
+    fail "telegram.sh initializes events DB on daemon start"
+fi
+
+# Test 102: telegram.sh prunes old events on daemon start
+run_test
+if sed -n '/^cmd_run_daemon/,/^}/p' ./telegram.sh | grep -q "DELETE FROM events"; then
+    pass "telegram.sh prunes old events on daemon start"
+else
+    fail "telegram.sh prunes old events on daemon start"
+fi
+
+# Test 103: lib.sh defines EVENTS_DB, init_events_db, log_event
+run_test
+has_all=true
+for sym in EVENTS_DB init_events_db log_event; do
+    if ! grep -q "$sym" ./lib.sh; then
+        has_all=false
+    fi
+done
+if [ "$has_all" = "true" ]; then
+    pass "lib.sh defines EVENTS_DB, init_events_db, log_event"
+else
+    fail "lib.sh defines EVENTS_DB, init_events_db, log_event"
+fi
+
+# Restore EVENTS_DB for any subsequent tests
+EVENTS_DB="${HOME}/.local/share/claude-notifier/events.db"
 
 # =============================================================================
 # Summary

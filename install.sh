@@ -24,7 +24,7 @@ fi
 
 # 1. Create data directories
 printf '  Creating data directories...\n'
-mkdir -p "${DATA_DIR}/active" "${DATA_DIR}/notifications"
+mkdir -p "${DATA_DIR}/active" "${DATA_DIR}/notifications" "${DATA_DIR}/telegram_msg_ids"
 
 # 2. Install default backends.conf (preserve existing)
 if [ ! -f "${DATA_DIR}/backends.conf" ]; then

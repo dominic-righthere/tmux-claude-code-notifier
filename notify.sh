@@ -8,6 +8,7 @@ source "${SCRIPT_DIR}/lib.sh"
 DATA_DIR="${HOME}/.local/share/claude-notifier"
 ACTIVE_DIR="${DATA_DIR}/active"
 NOTIF_DIR="${DATA_DIR}/notifications"
+MSG_ID_DIR="${DATA_DIR}/telegram_msg_ids"
 mkdir -p "$ACTIVE_DIR" "$NOTIF_DIR"
 
 # Read JSON from stdin
@@ -63,20 +64,24 @@ case "$EVENT" in
     SessionStart)
         # New Claude Code session — register immediately
         write_file "$ACTIVE_DIR" "working" "Starting..."
+        log_event src hook event SessionStart session "$SESSION" window "$WINDOW"
         ;;
     SessionEnd)
-        # Session closed — clean up both directories
-        rm -f "${ACTIVE_DIR}/${KEY}" "${NOTIF_DIR}/${KEY}"
+        # Session closed — clean up all state
+        rm -f "${ACTIVE_DIR}/${KEY}" "${NOTIF_DIR}/${KEY}" "${MSG_ID_DIR}/${KEY}"
+        log_event src hook event SessionEnd session "$SESSION" window "$WINDOW"
         ;;
     UserPromptSubmit)
-        # Claude is working — mark active, clear any existing notification
+        # Claude is working — mark active, clear notification + msg_id
         write_file "$ACTIVE_DIR" "working" "Working..."
-        rm -f "${NOTIF_DIR}/${KEY}"
+        rm -f "${NOTIF_DIR}/${KEY}" "${MSG_ID_DIR}/${KEY}"
+        log_event src hook event UserPromptSubmit session "$SESSION" window "$WINDOW"
         ;;
     PreToolUse)
         # Live tool activity — show what Claude is doing instead of "Working..."
         tool_label="${TOOL_NAME:-tool}"
         write_file "$ACTIVE_DIR" "working" "${tool_label}..."
+        log_event src hook event PreToolUse session "$SESSION" window "$WINDOW" tool "$TOOL_NAME"
         ;;
     Stop)
         # Claude finished — mark as idle (keep in active dir for visibility)
@@ -86,10 +91,12 @@ case "$EVENT" in
         if [ "$EXISTING_TYPE" = "waiting" ]; then
             # Keep the existing waiting notification, just ring bell
             printf '\a'
+            log_event src hook event Stop session "$SESSION" window "$WINDOW" message "skipped (waiting exists)"
         else
             write_file "$NOTIF_DIR" "finished" "Finished"
             printf '\a'
             "${SCRIPT_DIR}/dispatch.sh" "finished" "$SESSION" "$WINDOW" "Finished" &
+            log_event src hook event Stop session "$SESSION" window "$WINDOW" type finished
         fi
         ;;
     Notification)
@@ -101,6 +108,7 @@ case "$EVENT" in
         write_file "$NOTIF_DIR" "waiting" "$MSG"
         printf '\a'
         "${SCRIPT_DIR}/dispatch.sh" "waiting" "$SESSION" "$WINDOW" "$MSG" &
+        log_event src hook event Notification session "$SESSION" window "$WINDOW" message "$MSG"
         ;;
     PermissionRequest)
         # Permission needed — record as waiting with tool name
@@ -111,6 +119,7 @@ case "$EVENT" in
         write_file "$NOTIF_DIR" "waiting" "$local_msg"
         printf '\a'
         "${SCRIPT_DIR}/dispatch.sh" "waiting" "$SESSION" "$WINDOW" "$local_msg" "$TOOL_NAME" &
+        log_event src hook event PermissionRequest session "$SESSION" window "$WINDOW" tool "$TOOL_NAME"
         ;;
 esac
 
