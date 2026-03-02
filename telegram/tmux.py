@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import time
 
 # Tmux target validation patterns
 _SESSION_RE = re.compile(r"^[a-zA-Z0-9_.-]{1,50}$")
@@ -23,6 +24,9 @@ def validate_target(session: str, window: str) -> str | None:
     return None
 
 
+_PASTE_BUFFER_NAME = "_notifier"
+
+
 def run_tmux(*args: str, timeout: float = 5.0) -> str | None:
     """Run a tmux command, return stdout or None on failure."""
     try:
@@ -39,9 +43,42 @@ def run_tmux(*args: str, timeout: float = 5.0) -> str | None:
         return None
 
 
+def _run_tmux_stdin(data: str, *args: str, timeout: float = 5.0) -> bool:
+    """Run a tmux command with stdin data. Returns True on success."""
+    try:
+        result = subprocess.run(
+            ["tmux", *args],
+            input=data,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+
 def capture_pane(session: str, window: str, lines: int = 200) -> str | None:
     """Capture pane content, returns raw text or None."""
     return run_tmux("capture-pane", "-t", f"{session}:{window}", "-J", "-p", "-S", f"-{lines}")
+
+
+def capture_pane_escaped(session: str, window: str, lines: int = 200) -> str | None:
+    """Capture pane with ANSI codes preserved (for ghost text detection)."""
+    return run_tmux("capture-pane", "-e", "-t", f"{session}:{window}", "-J", "-p", "-S", f"-{lines}")
+
+
+def capture_wide(session: str, window: str, lines: int = 200, width: int = 250) -> tuple[str | None, int]:
+    """Resize pane wide, capture with ANSI, restore. Returns (text, capture_width)."""
+    target = f"{session}:{window}"
+    orig = pane_width(session, window)
+    resized = run_tmux("resize-pane", "-t", target, "-x", str(width)) is not None
+    if resized:
+        time.sleep(0.15)
+    captured = capture_pane_escaped(session, window, lines)
+    if resized:
+        run_tmux("resize-pane", "-t", target, "-x", str(orig))
+    return captured, width if resized else orig
 
 
 def pane_width(session: str, window: str) -> int:
@@ -70,11 +107,21 @@ def send_keys(session: str, window: str, *keys: str) -> bool:
 def send_text(session: str, window: str, text: str) -> bool:
     """Send literal text followed by Enter. Use for user-typed input."""
     target = f"{session}:{window}"
-    result = run_tmux("send-keys", "-t", target, "-l", text.strip())
-    if result is None:
-        return False
-    result = run_tmux("send-keys", "-t", target, "Enter")
-    return result is not None
+    clean = text.strip()
+
+    if len(clean) > 500 or "\n" in clean:
+        # Paste buffer approach — reliable for bulk text
+        if not _run_tmux_stdin(clean, "load-buffer", "-b", _PASTE_BUFFER_NAME, "-"):
+            return False
+        if run_tmux("paste-buffer", "-b", _PASTE_BUFFER_NAME, "-t", target, "-d", "-p") is None:
+            return False
+        time.sleep(0.1)  # let paste settle
+    else:
+        # Short single-line: send-keys -l (fast)
+        if run_tmux("send-keys", "-t", target, "-l", clean) is None:
+            return False
+
+    return run_tmux("send-keys", "-t", target, "Enter") is not None
 
 
 def has_session(session: str) -> bool:

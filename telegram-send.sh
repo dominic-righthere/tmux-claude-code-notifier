@@ -40,7 +40,8 @@ mkdir -p "$MSG_ID_DIR"
 SAFE_SESSION="$(sanitize_key "$SESSION")"
 MSG_KEY="${SAFE_SESSION}_${WINDOW}"
 
-log_event src send event dispatch type "$TYPE" session "$SESSION" window "$WINDOW" tool "$TOOL_NAME"
+# Early trace: log that the script was entered (before any pane capture that could crash)
+log_event src send event enter type "$TYPE" session "$SESSION" window "$WINDOW" tool "${TOOL_NAME:-}"
 
 # Get project name from pane current path
 project_name=""
@@ -96,6 +97,19 @@ if [ "$TYPE" != "prompt" ]; then
 
     detect_mode "$raw_context"
 fi
+
+# Skip waiting messages in auto-accept mode — permissions are auto-resolved
+if [ "$TYPE" = "waiting" ] && [ -n "$mode_auto" ]; then
+    log_event src send event skip_auto type "$TYPE" session "$SESSION" window "$WINDOW" mode "$mode_label"
+    exit 0
+fi
+
+# Log raw context to events DB for tracing
+if [ -n "$raw_context" ]; then
+    log_event src send event context type "$TYPE" session "$SESSION" window "$WINDOW" text "${raw_context: -500}"
+fi
+
+log_event src send event dispatch type "$TYPE" session "$SESSION" window "$WINDOW" tool "$TOOL_NAME" mode "${mode_label:-normal}"
 
 # ─── Modular message pipeline ────────────────────────────────────────────────
 
@@ -156,20 +170,23 @@ ${prompt_escaped}"
     local reflowed
     reflowed="$(printf '%s' "$raw_context" | reflow_for_telegram "$pane_width" | convert_tables_to_bullets)"
 
-    # Calculate character budget for prompt text: 4096 - header - activity reserve
-    local header_len="${#header}"
-    local prompt_budget=$(( 4096 - header_len - 600 ))
-    [ "$prompt_budget" -lt 200 ] && prompt_budget=200
-    [ "$prompt_budget" -gt 3000 ] && prompt_budget=3000
-
-    # Extract prompt text with char budget (from unwrapped text)
-    local prompt_text
-    prompt_text="$(extract_prompt_text "$reflowed" "$prompt_budget")"
+    # Extract prompt text (skip for finished — prompt was already shown)
     local prompt_escaped=""
-    if [ -n "$prompt_text" ]; then
-        # Wrap for display AFTER extraction
-        prompt_text="$(printf '%s' "$prompt_text" | wrap_long_lines 50)"
-        prompt_escaped="$(html_escape "$prompt_text")"
+    if [ "$TYPE" != "finished" ]; then
+        # Calculate character budget for prompt text: 4096 - header - activity reserve
+        local header_len="${#header}"
+        local prompt_budget=$(( 4096 - header_len - 600 ))
+        [ "$prompt_budget" -lt 200 ] && prompt_budget=200
+        [ "$prompt_budget" -gt 3000 ] && prompt_budget=3000
+
+        # Extract prompt text with char budget (from unwrapped text)
+        local prompt_text
+        prompt_text="$(extract_prompt_text "$reflowed" "$prompt_budget")"
+        if [ -n "$prompt_text" ]; then
+            # Wrap for display AFTER extraction
+            prompt_text="$(printf '%s' "$prompt_text" | wrap_long_lines 50)"
+            prompt_escaped="$(html_escape "$prompt_text")"
+        fi
     fi
 
     # Extract activity log (tool calls since last user input)
@@ -187,31 +204,33 @@ ${prompt_escaped}"
 ${prompt_escaped}"
     fi
 
-    # 2. Activity log or raw fallback in expandable blockquote
-    if [ -n "$activity_escaped" ]; then
-        local cur_len=$(( ${#header} + ${#body} ))
-        local max_activity=$(( 4096 - cur_len - 200 ))
-        if [ "$max_activity" -gt 100 ] && [ "${#activity_escaped}" -le "$max_activity" ]; then
-            body="${body}
+    # 2. Activity log or raw fallback in expandable blockquote (skip for waiting — noise)
+    if [ "$TYPE" != "waiting" ]; then
+        if [ -n "$activity_escaped" ]; then
+            local cur_len=$(( ${#header} + ${#body} ))
+            local max_activity=$(( 4096 - cur_len - 200 ))
+            if [ "$max_activity" -gt 100 ] && [ "${#activity_escaped}" -le "$max_activity" ]; then
+                body="${body}
 
 <blockquote expandable>Activity:
 ${activity_escaped}</blockquote>"
-        fi
-    else
-        # Fallback: raw context in expandable blockquote
-        local formatted
-        formatted="$(printf '%s' "$reflowed" | wrap_long_lines 50)"
-        local pane_context
-        pane_context="$(html_escape "$formatted")"
-        local cur_len=$(( ${#header} + ${#body} ))
-        local max_context=$(( 4096 - cur_len - 100 ))
-        if [ "$max_context" -gt 100 ]; then
-            if [ "${#pane_context}" -gt "$max_context" ]; then
-                pane_context="...${pane_context:$((${#pane_context} - max_context))}"
             fi
-            body="${body}
+        else
+            # Fallback: raw context in expandable blockquote
+            local formatted
+            formatted="$(printf '%s' "$reflowed" | wrap_long_lines 50)"
+            local pane_context
+            pane_context="$(html_escape "$formatted")"
+            local cur_len=$(( ${#header} + ${#body} ))
+            local max_context=$(( 4096 - cur_len - 100 ))
+            if [ "$max_context" -gt 100 ]; then
+                if [ "${#pane_context}" -gt "$max_context" ]; then
+                    pane_context="...${pane_context:$((${#pane_context} - max_context))}"
+                fi
+                body="${body}
 
 <blockquote expandable>${pane_context}</blockquote>"
+            fi
         fi
     fi
 }
@@ -224,13 +243,22 @@ build_keyboard() {
     kb_style="default"
     local btn_count=0
 
-    if [ "$TYPE" = "waiting" ] && [ -n "$TOOL_NAME" ] && [ -z "$mode_auto" ]; then
+    if [ "$TYPE" = "waiting" ] && [ -z "$mode_auto" ]; then
         # Extract prompt block: lines after last ⏺ marker (same scoping as extract_prompt_text)
         local prompt_block=""
         if [ -n "$raw_context" ]; then
             prompt_block="$(printf '%s' "$raw_context" | awk '
                 /⏺/ { buf = ""; next }
                 { buf = buf "\n" $0 }
+                END { print buf }
+            ')"
+        fi
+
+        # Scope to option selection UI (after last ───── or ╌╌╌╌╌ separator)
+        if printf '%s' "$prompt_block" | grep -q '[─╌][─╌][─╌][─╌][─╌]'; then
+            prompt_block="$(printf '%s' "$prompt_block" | awk '
+                /[─╌][─╌][─╌][─╌][─╌]/ { buf = ""; next }
+                { buf = buf (buf ? "\n" : "") $0 }
                 END { print buf }
             ')"
         fi
@@ -265,7 +293,7 @@ build_keyboard() {
             view_btn="$(jq -n --arg s "$SESSION" --arg w "$WINDOW" \
                 '{text: "👁 View", callback_data: ("view:" + $s + ":" + $w)}')"
             keyboard="{\"inline_keyboard\":[${option_rows},[${view_btn}]]}"
-        else
+        elif [ -n "$TOOL_NAME" ]; then
             kb_style="approve_deny"
             keyboard="$(jq -n --arg s "$SESSION" --arg w "$WINDOW" '{
                 inline_keyboard: [
@@ -277,6 +305,13 @@ build_keyboard() {
                         {text: "👁 View", callback_data: ("view:" + $s + ":" + $w)}
                     ]
                 ]
+            }')"
+        else
+            kb_style="view_only"
+            keyboard="$(jq -n --arg s "$SESSION" --arg w "$WINDOW" '{
+                inline_keyboard: [[
+                    {text: "👁 View Output", callback_data: ("view:" + $s + ":" + $w)}
+                ]]
             }')"
         fi
     else
@@ -362,7 +397,7 @@ send_or_edit() {
     # Extract and store message_id:type for future edits
     local new_msg_id
     new_msg_id="$(printf '%s' "$send_result" | jq -r '.result.message_id // empty' 2>/dev/null)" || new_msg_id=""
-    if [ -n "$new_msg_id" ]; then
+    if [ -n "$new_msg_id" ] && [ "$TYPE" != "prompt" ]; then
         printf '%s' "${new_msg_id}:${TYPE}" > "${MSG_ID_DIR}/${MSG_KEY}"
         log_event src send event new type "$TYPE" session "$SESSION" window "$WINDOW" msg_id "$new_msg_id"
     else

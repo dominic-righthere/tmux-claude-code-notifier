@@ -22,6 +22,12 @@ if ! command -v jq &>/dev/null; then
     exit 1
 fi
 
+if ! command -v uv &>/dev/null; then
+    printf '  Error: uv is required but not installed.\n'
+    printf '  Install with: curl -LsSf https://astral.sh/uv/install.sh | sh\n'
+    exit 1
+fi
+
 # 1. Create data directories
 printf '  Creating data directories...\n'
 mkdir -p "${DATA_DIR}/active" "${DATA_DIR}/notifications" "${DATA_DIR}/telegram_msg_ids"
@@ -49,6 +55,8 @@ chmod +x "${SCRIPT_DIR}/popup.sh"
 chmod +x "${SCRIPT_DIR}/telegram-setup.sh"
 chmod +x "${SCRIPT_DIR}/telegram-send.sh"
 chmod +x "${SCRIPT_DIR}/telegram.sh"
+chmod +x "${SCRIPT_DIR}/telegram-send-py.sh"
+chmod +x "${SCRIPT_DIR}/telegram-bot.sh"
 chmod +x "${SCRIPT_DIR}/restart.sh"
 chmod +x "${SCRIPT_DIR}/doctor.sh"
 
@@ -120,13 +128,19 @@ if [ -f "${SCRIPT_DIR}/VERSION" ]; then
     printf '  Recorded version %s\n' "$(<"${SCRIPT_DIR}/VERSION")"
 fi
 
-# 7. Restart Telegram bot if it's currently running (picks up new code)
+# 7. Install Python dependencies for Telegram backend
+printf '  Installing Python dependencies...\n'
+(cd "${SCRIPT_DIR}/telegram" && uv sync --quiet 2>&1) || {
+    printf '  Warning: uv sync failed. Telegram notifications may not work.\n'
+}
+
+# 8. Restart Telegram bot if it's currently running (picks up new code)
 if [ -f "${DATA_DIR}/telegram.pid" ]; then
     old_pid="$(<"${DATA_DIR}/telegram.pid")"
     if kill -0 "$old_pid" 2>/dev/null; then
         printf '  Restarting Telegram bot...\n'
-        "${SCRIPT_DIR}/telegram.sh" stop
-        "${SCRIPT_DIR}/telegram.sh" start
+        "${SCRIPT_DIR}/telegram-bot.sh" stop
+        "${SCRIPT_DIR}/telegram-bot.sh" start
     else
         rm -f "${DATA_DIR}/telegram.pid"
     fi

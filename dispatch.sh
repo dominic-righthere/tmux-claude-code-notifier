@@ -28,8 +28,8 @@ while IFS= read -r line; do
     # Skip if backend script doesn't exist or isn't executable
     [ -x "$local_path" ] || continue
 
-    # Call backend with same args, in background
-    "$local_path" "$@" &
+    # Call backend with same args, in background (stderr → log file for debugging)
+    "$local_path" "$@" 2>>"${DATA_DIR}/send-errors.log" &
 done < "$BACKENDS_CONF"
 
 # Don't wait for backends — caller already backgrounded us if needed

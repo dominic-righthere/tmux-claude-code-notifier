@@ -23,6 +23,7 @@ from telegram.parse import (
     html_escape,
     reflow_for_telegram,
     strip_ansi,
+    strip_ghost_text,
     strip_terminal_chrome,
     trim_blank_lines,
     wrap_long_lines,
@@ -126,9 +127,10 @@ def _get_session_info(session: str, window: str) -> dict:
         info["project"] = Path(pane_path).name
 
     # Capture bottom lines for mode/task detection
-    bottom = tmux.run_tmux("capture-pane", "-t", f"{session}:{window}", "-J", "-p", "-S", "-8")
+    bottom = tmux.run_tmux("capture-pane", "-e", "-t", f"{session}:{window}", "-J", "-p", "-S", "-8")
     if bottom:
-        bottom_clean = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", bottom)
+        bottom_clean = strip_ghost_text(bottom)
+        bottom_clean = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", bottom_clean)
         if re.search(r"plan mode", bottom_clean, re.IGNORECASE):
             info["mode"] = "plan mode"
             info["mode_icon"] = "⏸"
@@ -166,21 +168,30 @@ def _clean_pane_for_view(raw: str, pw: int) -> str:
     Strips ANSI, terminal chrome, scopes to the current work block
     (after last ❯ prompt), then reflows/wraps for mobile.
     """
-    text = strip_ansi(raw)
+    text = strip_ghost_text(raw)
+    text = strip_ansi(text)
     text = strip_terminal_chrome(text)
 
-    # Scope to current work block: everything after last ❯ line
+    # Scope to current work block: everything after last ❯ line.
+    # If the last work block has < 5 non-blank lines (e.g. empty new prompt
+    # after task completion), fall back to the second-to-last prompt.
     lines = text.splitlines()
-    last_prompt = -1
+    prompt_indices: list[int] = []
     for i, line in enumerate(lines):
         if re.match(r"^\s*❯\s+", line):
-            last_prompt = i
-    if last_prompt >= 0:
-        lines = lines[last_prompt:]
+            prompt_indices.append(i)
+    if prompt_indices:
+        last = prompt_indices[-1]
+        work_block = lines[last:]
+        non_blank = [l for l in work_block if l.strip()]
+        if len(non_blank) < 5 and len(prompt_indices) >= 2:
+            lines = lines[prompt_indices[-2]:]
+        else:
+            lines = work_block
 
-    # Keep last 50 lines to avoid walls of text
-    if len(lines) > 50:
-        lines = lines[-50:]
+    # Keep last 80 lines to avoid walls of text
+    if len(lines) > 80:
+        lines = lines[-80:]
 
     text = "\n".join(lines)
     text = reflow_for_telegram(text, pw)
@@ -410,16 +421,15 @@ class BotHandler:
             await self.send(err)
             return
 
-        pw = tmux.pane_width(sess, win)
-        raw = tmux.capture_pane(sess, win) or ""
-        output = _clean_pane_for_view(raw, pw)
+        raw, pw = tmux.capture_wide(sess, win)
+        output = _clean_pane_for_view(raw or "", pw)
 
         if not output:
             await self.send(f"<b>{sess}:{win}</b>\n\n(empty)")
             return
 
         info = _get_session_info(sess, win)
-        header = f"{sess}:{win}"
+        header = f"📋 <b>View</b>\n{sess}:{win}"
         if info["project"]:
             header += f" · {info['project']}"
 
@@ -430,7 +440,7 @@ class BotHandler:
         output_escaped = html_escape(output)
 
         await self.send(
-            f"<b>{header}</b>\n\n{preview}\n\n<blockquote expandable>{output_escaped}</blockquote>"
+            f"{header}\n\n{preview}\n\n<blockquote expandable>{output_escaped}</blockquote>"
         )
 
     async def _action(self, sess: str, win: str, keys: list[str], label: str, cb_msg_id: str = "") -> str:
@@ -686,16 +696,15 @@ class BotHandler:
                     await self.send(f"<b>{sess}:{win}</b>\n\n{err}")
                     return
 
-                pw = tmux.pane_width(sess, win)
-                raw = tmux.capture_pane(sess, win) or ""
-                output = _clean_pane_for_view(raw, pw)
+                raw, pw = tmux.capture_wide(sess, win)
+                output = _clean_pane_for_view(raw or "", pw)
 
                 if not output:
                     await self.send(f"<b>{sess}:{win}</b>\n\n(empty)")
                     return
 
                 info = _get_session_info(sess, win)
-                header = f"{sess}:{win}"
+                header = f"📋 <b>View</b>\n{sess}:{win}"
                 if info["project"]:
                     header += f" · {info['project']}"
 
@@ -704,7 +713,7 @@ class BotHandler:
                     output = "..." + output[len(output) - 3800:]
 
                 await self.send(
-                    f"<b>{header}</b>\n\n{preview}\n\n"
+                    f"{header}\n\n{preview}\n\n"
                     f"<blockquote expandable>{html_escape(output)}</blockquote>"
                 )
             case "prompt":

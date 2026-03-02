@@ -91,13 +91,28 @@ fi
 
 [ "$QUIET" -eq 0 ] && printf "${YELLOW}Dependencies${NC}\n"
 
-for dep in jq tmux curl; do
+for dep in jq tmux curl uv; do
     if command -v "$dep" &>/dev/null; then
         result_pass "${dep} found"
     else
-        result_fail "${dep} not found"
+        if [ "$dep" = "uv" ]; then
+            result_fail "${dep} not found — install with: curl -LsSf https://astral.sh/uv/install.sh | sh"
+        else
+            result_fail "${dep} not found"
+        fi
     fi
 done
+
+# Check Python telegram package
+if [ -d "${SCRIPT_DIR}/telegram" ] && [ -f "${SCRIPT_DIR}/telegram/pyproject.toml" ]; then
+    if [ -d "${SCRIPT_DIR}/telegram/.venv" ]; then
+        result_pass "Python venv present"
+    else
+        result_warn "Python venv missing — run: cd ${SCRIPT_DIR}/telegram && uv sync"
+    fi
+else
+    result_fail "telegram/ Python package missing"
+fi
 
 # ─── 3. Data directories ─────────────────────────────────────────────────────
 
@@ -210,7 +225,7 @@ else
                 if [ -n "$version_mtime" ] && [ -n "$proc_start" ]; then
                     proc_epoch="$(date -jf '%a %b %d %T %Y' "$proc_start" +%s 2>/dev/null || date -d "$proc_start" +%s 2>/dev/null)" || proc_epoch=""
                     if [ -n "$proc_epoch" ] && [ "$version_mtime" -gt "$proc_epoch" ]; then
-                        result_warn "Telegram bot running stale code — restart with: telegram.sh stop && telegram.sh start"
+                        result_warn "Telegram bot running stale code — restart with: telegram-bot.sh stop && telegram-bot.sh start"
                     else
                         result_pass "Telegram bot code is up to date"
                     fi
