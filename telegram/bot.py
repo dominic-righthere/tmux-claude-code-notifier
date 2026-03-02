@@ -542,7 +542,9 @@ class BotHandler:
                 stderr=asyncio.subprocess.STDOUT,
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
-            output = stdout.decode() if stdout else "All checks passed."
+            output = stdout.decode().strip() if stdout else ""
+            if not output:
+                output = "All checks passed."
         except asyncio.TimeoutError:
             output = "Doctor timed out after 30s."
         except Exception as e:

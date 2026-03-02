@@ -76,7 +76,7 @@ def build_body(ctx: SendContext, header: str) -> str:
     if ctx.event_type == EventType.WAITING:
         if ctx.tool_name:
             # Permission request: show the command/action block in <code>
-            cmd_block = extract_command_block(reflowed)
+            cmd_block = extract_command_block(ctx.raw_pre_chrome or reflowed)
             if cmd_block:
                 cmd_block = wrap_long_lines(cmd_block, 50)
                 body = f"\n\n<code>{html_escape(cmd_block)}</code>"
@@ -174,7 +174,9 @@ def _extract_options(raw_context: str, raw_pre_chrome: str = "") -> list[tuple[s
                 break  # non-match after finding options = end of contiguous block
 
     options.reverse()
-    return options[:4]
+    # Require at least 2 options — a single match is almost always a false
+    # positive (e.g. numbered list item in Claude's output text)
+    return options[:4] if len(options) >= 2 else []
 
 
 def build_keyboard(ctx: SendContext) -> tuple[InlineKeyboard, KeyboardStyle]:

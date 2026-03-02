@@ -194,13 +194,22 @@ class TestBuildBodyPermissionFallback:
         assert "implementation plan" in payload.text
 
     def test_permission_with_separator_unchanged(self):
-        """Bash with separator still uses <code> block."""
+        """Bash with separator still uses <code> block.
+
+        raw_context has separators stripped (by strip_terminal_chrome),
+        raw_pre_chrome preserves them — extract_command_block uses raw_pre_chrome.
+        """
         ctx = SendContext(
             event_type=EventType.WAITING,
             session="main",
             window="1",
             tool_name="Bash",
             raw_context="\n".join([
+                "⏺ Bash(ls -la)",
+                "ls -la /tmp",
+                "❯ proceed?",
+            ]),
+            raw_pre_chrome="\n".join([
                 "⏺ Bash(ls -la)",
                 "───────────────",
                 "ls -la /tmp",
@@ -245,6 +254,12 @@ class TestExtractOptions:
 
     def test_no_options(self):
         raw = "⏺ Just a question with no numbered options."
+        options = _extract_options(raw)
+        assert options == []
+
+    def test_single_option_returns_empty(self):
+        """A single numbered match is a false positive — require >= 2."""
+        raw = "⏺ Here's the summary:\n  3.  — 2 new tests\n  Done."
         options = _extract_options(raw)
         assert options == []
 
@@ -340,5 +355,88 @@ class TestExtractOptions:
         header = build_header(ctx)
         assert "Waiting for Input" in header
         assert "Permission Request" not in header
-        kb, style = build_keyboard(ctx)
+        _, style = build_keyboard(ctx)
         assert style == KeyboardStyle.OPTIONS
+
+
+class TestMCPToolPermissionPrompt:
+    """Reproduce the exact MCP tool permission prompt format."""
+
+    # Pre-chrome text (before strip_terminal_chrome) — separators intact
+    RAW_PRE_CHROME = "\n".join([
+        "⏺ mcp__traefik__doctor (MCP)",
+        "  ⎿  Running…",
+        "───────────────────────────────────────────────",
+        "",
+        "  Tool use: mcp__traefik__doctor",
+        "  MCP Server: traefik",
+        "",
+        "  Do you want to proceed?",
+        "  ❯ 1. Yes",
+        "    2. Yes, and don't ask again for mcp__traefik__doctor",
+        "    3. No",
+        "Esc to cancel · Tab to amend",
+    ])
+
+    # raw_context (after strip_terminal_chrome) — separator + hints removed
+    RAW_CONTEXT = "\n".join([
+        "⏺ mcp__traefik__doctor (MCP)",
+        "",
+        "  Tool use: mcp__traefik__doctor",
+        "  MCP Server: traefik",
+        "",
+        "  Do you want to proceed?",
+        "  ❯ 1. Yes",
+        "    2. Yes, and don't ask again for mcp__traefik__doctor",
+        "    3. No",
+    ])
+
+    def _make_ctx(self) -> SendContext:
+        return SendContext(
+            event_type=EventType.WAITING,
+            session="main",
+            window="1",
+            tool_name="mcp__traefik__doctor",
+            project_name="infra",
+            raw_context=self.RAW_CONTEXT,
+            raw_pre_chrome=self.RAW_PRE_CHROME,
+        )
+
+    def test_options_extracted(self):
+        """Should detect the 3 numbered options from pre-chrome text."""
+        options = _extract_options(self.RAW_CONTEXT, self.RAW_PRE_CHROME)
+        assert len(options) == 3
+        assert options[0] == ("1", "Yes")
+        assert "don't ask again" in options[1][1]
+        assert options[2] == ("3", "No")
+
+    def test_keyboard_is_options_style(self):
+        """Should produce OPTIONS keyboard, not APPROVE_DENY."""
+        ctx = self._make_ctx()
+        _, style = build_keyboard(ctx)
+        assert style == KeyboardStyle.OPTIONS
+
+    def test_body_shows_command_block(self):
+        """Body should contain tool description in <code>, not scrollback."""
+        ctx = self._make_ctx()
+        payload = build_message(ctx)
+        assert "<code>" in payload.text
+        assert "mcp__traefik__doctor" in payload.text
+        assert "MCP Server: traefik" in payload.text
+        # Should NOT fall back to blockquote
+        assert "<blockquote" not in payload.text
+
+    def test_body_without_pre_chrome_falls_back(self):
+        """Without raw_pre_chrome, no separator → fallback to blockquote."""
+        ctx = SendContext(
+            event_type=EventType.WAITING,
+            session="main",
+            window="1",
+            tool_name="mcp__traefik__doctor",
+            raw_context=self.RAW_CONTEXT,
+            # no raw_pre_chrome — simulates the bug
+        )
+        payload = build_message(ctx)
+        # No separator in raw_context → extract_command_block returns ""
+        # Falls back to extract_prompt_text → blockquote (not <code> body block)
+        assert "<blockquote expandable>" in payload.text

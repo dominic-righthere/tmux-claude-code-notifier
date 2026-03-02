@@ -2,13 +2,17 @@
 
 import pytest
 
+import asyncio
+
 from telegram.bot import (
+    BotHandler,
     MAX_SEND_TEXT_LEN,
     _clean_pane_for_view,
     _resolve_target,
     parse_command,
     dispatch_callback_data,
 )
+from telegram.models import TelegramConfig
 from telegram.tmux import capture_wide, send_text
 
 
@@ -389,6 +393,59 @@ class TestCaptureWide:
         # No restore resize should be attempted
         resize_calls = [c for c in calls if c[0] == "resize-pane"]
         assert len(resize_calls) == 1  # only the failed attempt
+
+
+class TestCmdDoctor:
+    """Test cmd_doctor handles empty/whitespace output."""
+
+    def test_empty_stdout_shows_all_passed(self, monkeypatch):
+        """When doctor.sh --quiet outputs only whitespace, show fallback."""
+        sent: list[str] = []
+        config = TelegramConfig(bot_token="fake", chat_id="123")
+        handler = BotHandler(config, "/tmp")
+
+        async def fake_send(text, reply_markup=None):
+            sent.append(text)
+            return "1"
+
+        handler.send = fake_send
+
+        async def fake_subprocess(*args, **kwargs):
+            class FakeProc:
+                async def communicate(self):
+                    return (b"\n", None)
+            return FakeProc()
+
+        monkeypatch.setattr("asyncio.create_subprocess_exec", fake_subprocess)
+        asyncio.run(handler.cmd_doctor())
+
+        assert len(sent) == 1
+        assert "All checks passed." in sent[0]
+        # Should not contain just <pre>\n</pre>
+        assert sent[0] != "<pre>\n</pre>"
+
+    def test_none_stdout_shows_all_passed(self, monkeypatch):
+        """When stdout is None, show fallback."""
+        sent: list[str] = []
+        config = TelegramConfig(bot_token="fake", chat_id="123")
+        handler = BotHandler(config, "/tmp")
+
+        async def fake_send(text, reply_markup=None):
+            sent.append(text)
+            return "1"
+
+        handler.send = fake_send
+
+        async def fake_subprocess(*args, **kwargs):
+            class FakeProc:
+                async def communicate(self):
+                    return (None, None)
+            return FakeProc()
+
+        monkeypatch.setattr("asyncio.create_subprocess_exec", fake_subprocess)
+        asyncio.run(handler.cmd_doctor())
+
+        assert "All checks passed." in sent[0]
 
 
 class TestMaxSendTextLen:

@@ -61,9 +61,16 @@ detect_mode() {
     mode_auto=""
     [ -z "$context" ] && return
 
+    # Scope to last 15 lines — mode indicators are status-line elements
+    # near the bottom of the pane. Scanning the full scrollback causes
+    # false positives when test fixtures or output text contain ⏵⏵ or
+    # 'plan mode'.
+    local tail
+    tail="$(printf '%s' "$context" | tail -15)"
+
     # ⏵⏵ signals auto-accept — extract the actual label from the terminal
     local match
-    match="$(printf '%s' "$context" | grep -o '⏵⏵[^(]*' | tail -1)" || match=""
+    match="$(printf '%s' "$tail" | grep -o '⏵⏵[^(]*' | tail -1)" || match=""
     if [ -n "$match" ]; then
         match="${match%"${match##*[![:space:]]}"}"  # trim trailing whitespace
         mode_label="$match"
@@ -72,7 +79,7 @@ detect_mode() {
     fi
 
     # Other mode indicators
-    if printf '%s' "$context" | grep -qi 'plan mode'; then
+    if printf '%s' "$tail" | grep -qi 'plan mode'; then
         mode_label="⏸ plan mode"
     fi
 }
@@ -96,6 +103,14 @@ if [ "$TYPE" != "prompt" ]; then
     fi
 
     detect_mode "$raw_context"
+
+    # Override auto mode if pane shows a pending permission prompt
+    # (dangerous commands require approval even in auto-accept mode)
+    if [ -n "$mode_auto" ]; then
+        if printf '%s' "$raw_context" | tail -30 | grep -q '❯[[:space:]]\+[1-4]\.[[:space:]]\+[[:alnum:]]'; then
+            mode_auto=""
+        fi
+    fi
 fi
 
 # Skip waiting messages in auto-accept mode — permissions are auto-resolved

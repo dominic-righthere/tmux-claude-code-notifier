@@ -108,14 +108,17 @@ def detect_mode(context: str) -> ModeInfo:
     if not context:
         return ModeInfo()
 
+    # Scope to last 15 lines — mode indicators are near pane bottom
+    tail = "\n".join(context.splitlines()[-15:])
+
     # ⏵⏵ signals auto-accept
-    matches = re.findall(r"⏵⏵[^(]*", context)
+    matches = re.findall(r"⏵⏵[^(]*", tail)
     if matches:
         label = matches[-1].rstrip()
         return ModeInfo(label=label, auto=True)
 
     # Plan mode
-    if re.search(r"plan mode", context, re.IGNORECASE):
+    if re.search(r"plan mode", tail, re.IGNORECASE):
         return ModeInfo(label="⏸ plan mode", auto=False)
 
     return ModeInfo()

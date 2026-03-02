@@ -60,12 +60,44 @@ class TestSendNotification:
         mock_state.load_config.return_value = config
         mock_state.make_msg_key.return_value = "main_1"
         mock_tmux.pane_current_path.return_value = "/home/user/project"
-        mock_tmux.capture_wide.return_value = ("⏵⏵ Auto-accept edits some text", 120)
+        # No numbered options visible — tool was truly auto-accepted
+        mock_tmux.capture_wide.return_value = ("⏵⏵ Auto-accept edits\n⏺ Running some command...", 120)
 
         send_notification(EventType.WAITING, "main", "1", "Waiting", "Bash")
 
         mock_api.send_message.assert_not_called()
         mock_api.edit_message.assert_not_called()
+
+    @patch("telegram.send.api")
+    @patch("telegram.send.tmux")
+    @patch("telegram.send.state")
+    @patch("telegram.send.db")
+    def test_auto_accept_with_pending_prompt(self, mock_db, mock_state, mock_tmux, mock_api):
+        """Dangerous commands show a prompt even in auto-accept — should NOT skip."""
+        from telegram.models import TelegramConfig
+
+        config = TelegramConfig(bot_token="123:ABC", chat_id="456")
+        mock_state.load_config.return_value = config
+        mock_state.make_msg_key.return_value = "main_1"
+        mock_state.read_msg_id.return_value = None
+        mock_tmux.pane_current_path.return_value = "/home/user/project"
+        # Pane has ⏵⏵ (auto-accept active) AND a permission prompt with numbered options
+        mock_tmux.capture_wide.return_value = (
+            "⏵⏵ Auto-accept edits\n"
+            "⏺ Claude wants to run this command:\n"
+            "  rm -rf /tmp/stuff && echo done\n"
+            "──────────────────────────────\n"
+            "  Do you want to proceed?\n"
+            "  ❯ 1. Yes\n"
+            "    2. No\n",
+            120,
+        )
+        mock_api.send_message.return_value = "500"
+
+        send_notification(EventType.WAITING, "main", "1", "Waiting", "Bash")
+
+        # Should NOT be skipped — notification must be sent
+        mock_api.send_message.assert_called_once()
 
     @patch("telegram.send.api")
     @patch("telegram.send.tmux")

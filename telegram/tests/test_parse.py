@@ -304,6 +304,50 @@ class TestDetectMode:
         assert mode.label == "⏵⏵ Auto-accept edits"
         assert mode.auto is True
 
+    def test_ignores_auto_accept_in_scrollback(self):
+        """⏵⏵ in scrollback above last 15 lines should NOT trigger auto mode."""
+        scrollback = "\n".join([
+            '  "⏵⏵ Auto-accept edits',
+            '  87 +  "⏺ Claude Code"',
+        ])
+        padding = "\n".join([f"line {i}" for i in range(20)])
+        bottom = "\n".join([
+            "⏺ I need to run a command.",
+            "  Can I proceed?",
+        ])
+        context = scrollback + "\n" + padding + "\n" + bottom
+        mode = detect_mode(context)
+        assert mode.auto is False
+        assert mode.label == ""
+
+    def test_finds_auto_accept_in_last_15_lines(self):
+        """⏵⏵ within the last 15 lines is correctly detected."""
+        padding = "\n".join([f"line {i}" for i in range(20)])
+        bottom = "\n".join([
+            "⏺ Working on the task",
+            "⏵⏵ Auto-accept edits (3 remaining)",
+        ])
+        context = padding + "\n" + bottom
+        mode = detect_mode(context)
+        assert mode.auto is True
+        assert "⏵⏵" in mode.label
+
+    def test_ignores_plan_mode_in_scrollback(self):
+        """'plan mode' in scrollback body should NOT trigger plan mode."""
+        scrollback = "\n".join([
+            "⏺ I've written the plan. Use plan mode for non-trivial changes.",
+            "  The plan file is at ~/.claude/plan.md",
+        ])
+        padding = "\n".join([f"line {i}" for i in range(20)])
+        bottom = "\n".join([
+            "⏺ Done implementing the fix.",
+            "  All tests pass.",
+        ])
+        context = scrollback + "\n" + padding + "\n" + bottom
+        mode = detect_mode(context)
+        assert mode.label == ""
+        assert mode.auto is False
+
 
 class TestReflow:
     def test_joins_wrapped_lines(self):
@@ -558,3 +602,35 @@ class TestExtractCommandBlock:
         ])
         result = extract_command_block(text)
         assert "actual command" in result
+
+    def test_pre_chrome_text_has_separators(self):
+        """Pre-chrome text (before strip_terminal_chrome) preserves separators."""
+        pre_chrome = "\n".join([
+            "⏺ mcp__traefik__doctor (MCP)",
+            "  ⎿  Running…",
+            "───────────────────────────────────────────────",
+            "",
+            "  Tool use: mcp__traefik__doctor",
+            "  MCP Server: traefik",
+            "",
+            "  Do you want to proceed?",
+            "  ❯ 1. Yes",
+        ])
+        result = extract_command_block(pre_chrome)
+        assert "Tool use: mcp__traefik__doctor" in result
+        assert "MCP Server: traefik" in result
+        assert "Do you want to proceed" not in result
+
+    def test_chrome_stripped_text_missing_separators(self):
+        """After strip_terminal_chrome, separators are gone → returns empty."""
+        chrome_stripped = "\n".join([
+            "⏺ mcp__traefik__doctor (MCP)",
+            "",
+            "  Tool use: mcp__traefik__doctor",
+            "  MCP Server: traefik",
+            "",
+            "  Do you want to proceed?",
+            "  ❯ 1. Yes",
+        ])
+        result = extract_command_block(chrome_stripped)
+        assert result == ""

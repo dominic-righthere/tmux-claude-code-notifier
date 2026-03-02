@@ -6,13 +6,14 @@ CLI: python -m telegram send <type> <session> <window> <message> [tool_name]
 from __future__ import annotations
 
 import logging
+import re
 import sys
 import time
 from pathlib import Path
 
 from telegram import api, db, state, tmux
 from telegram.message import build_message
-from telegram.models import EventType, MsgIdEntry, SendContext
+from telegram.models import EventType, ModeInfo, MsgIdEntry, SendContext
 from telegram.parse import detect_mode, strip_ansi, strip_ghost_text, strip_terminal_chrome, trim_blank_lines
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,13 @@ def send_notification(
             raw_pre_chrome = raw_context  # save for option extraction (separators intact)
             raw_context = strip_terminal_chrome(raw_context)
             raw_context = trim_blank_lines(raw_context)
+
+    # Override auto mode if pane shows a manual-approval prompt
+    # (dangerous commands require approval even in auto-accept mode)
+    if mode.auto and raw_pre_chrome:
+        tail = raw_pre_chrome.splitlines()[-30:]
+        if any(re.search(r'❯\s+[1-4]\.\s+\w', line) for line in tail):
+            mode = ModeInfo(label=mode.label, auto=False)
 
     # Skip waiting in auto-accept mode
     if event_type == EventType.WAITING and mode.auto:
