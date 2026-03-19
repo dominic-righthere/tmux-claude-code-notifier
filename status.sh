@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # Claude Code Notifier — status bar widget
-# Outputs per-type badges and toggles a second status line with details
+# Outputs per-type badges and manages a second status line with details
 DATA_DIR="${HOME}/.local/share/claude-notifier"
 ACTIVE_DIR="${DATA_DIR}/active"
 NOTIF_DIR="${DATA_DIR}/notifications"
+
+# Persistent second status bar: shown always unless status2.disabled flag exists
+STATUS2_PERSISTENT=1
+[ -f "${DATA_DIR}/status2.disabled" ] && STATUS2_PERSISTENT=0
 
 NOW="$(date +%s)"
 
@@ -80,11 +84,9 @@ fi
 
 printf '%s' "$OUTPUT"
 
-# Toggle second status line — only show if there are actionable notifications
+# Build notification detail line (waiting + finished entries)
+DETAIL=""
 if [ "$WAITING" -gt 0 ] || [ "$FINISHED" -gt 0 ]; then
-    # Collect ALL notification details inline
-    DETAIL=""
-
     if [ -d "$NOTIF_DIR" ]; then
         for f in "$NOTIF_DIR"/*; do
             [ -f "$f" ] || continue
@@ -120,13 +122,17 @@ if [ "$WAITING" -gt 0 ] || [ "$FINISHED" -gt 0 ]; then
             fi
         done
     fi
+fi
 
-    if [ -n "$DETAIL" ]; then
-        tmux set -g status 2 2>/dev/null
-        tmux set -g 'status-format[1]' "#[align=left]${OUTPUT}${DETAIL}" 2>/dev/null
-    else
-        tmux set -g status on 2>/dev/null
-    fi
+# Manage second status bar:
+# - Persistent mode (default): always show status 2 when there are any sessions
+# - Non-persistent (status2.disabled flag): only show when actionable notifications exist
+if [ "$STATUS2_PERSISTENT" -eq 1 ] && [ "$TOTAL" -gt 0 ]; then
+    tmux set -g status 2 2>/dev/null
+    tmux set -g 'status-format[1]' "#[align=left]${OUTPUT}${DETAIL}" 2>/dev/null
+elif [ -n "$DETAIL" ]; then
+    tmux set -g status 2 2>/dev/null
+    tmux set -g 'status-format[1]' "#[align=left]${OUTPUT}${DETAIL}" 2>/dev/null
 else
     tmux set -g status on 2>/dev/null
 fi

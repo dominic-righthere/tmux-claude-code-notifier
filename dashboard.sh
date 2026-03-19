@@ -28,27 +28,20 @@ relative_time() {
 }
 
 parse_file() {
-    local file="$1" prefix="$2"
-    local _session="" _window="" _window_name="" _message="" _type="" _timestamp=""
+    local file="$1"
+    # Variables set globally (no local declaration) so caller can read them
+    P_SESSION="" P_WINDOW="" P_WINDOW_NAME="" P_MESSAGE="" P_TYPE="" P_TIMESTAMP=""
     while IFS= read -r line; do
-        local key="${line%%=*}"
-        local val="${line#*=}"
-        case "$key" in
-            SESSION) _session="$val" ;;
-            WINDOW) _window="$val" ;;
-            WINDOW_NAME) _window_name="$val" ;;
-            MESSAGE) _message="$val" ;;
-            TYPE) _type="$val" ;;
-            TIMESTAMP) _timestamp="$val" ;;
+        case "${line%%=*}" in
+            SESSION) P_SESSION="${line#*=}" ;;
+            WINDOW) P_WINDOW="${line#*=}" ;;
+            WINDOW_NAME) P_WINDOW_NAME="${line#*=}" ;;
+            MESSAGE) P_MESSAGE="${line#*=}" ;;
+            TYPE) P_TYPE="${line#*=}" ;;
+            TIMESTAMP) P_TIMESTAMP="${line#*=}" ;;
         esac
     done < "$file" || true
-    [ -z "$_session" ] && return 1
-    declare -g "${prefix}_SESSION=$_session"
-    declare -g "${prefix}_WINDOW=$_window"
-    declare -g "${prefix}_WINDOW_NAME=$_window_name"
-    declare -g "${prefix}_MESSAGE=$_message"
-    declare -g "${prefix}_TYPE=$_type"
-    declare -g "${prefix}_TIMESTAMP=$_timestamp"
+    [ -z "$P_SESSION" ] && return 1
     return 0
 }
 
@@ -161,7 +154,7 @@ load_entries() {
     # Read active entries (working + idle)
     for f in "$ACTIVE_DIR"/*; do
         [ -f "$f" ] || continue
-        if parse_file "$f" "P"; then
+        if parse_file "$f"; then
             INDEX=$(( INDEX + 1 ))
             E_SESSION[$INDEX]="$P_SESSION"
             E_WINDOW[$INDEX]="$P_WINDOW"
@@ -178,7 +171,7 @@ load_entries() {
     # Read notification entries — split into waiting and finished
     for f in "$NOTIF_DIR"/*; do
         [ -f "$f" ] || continue
-        if parse_file "$f" "P"; then
+        if parse_file "$f"; then
             INDEX=$(( INDEX + 1 ))
             E_SESSION[$INDEX]="$P_SESSION"
             E_WINDOW[$INDEX]="$P_WINDOW"
@@ -366,9 +359,14 @@ render() {
     if [ "$SEARCH_MODE" -eq 1 ]; then
         printf '\n  /%s_\n' "$SEARCH_QUERY"
     else
-        local max_key
+        local max_key status2_indicator
         max_key="$(pos_to_key "$DISPLAY_COUNT")"
-        printf '\n  [jk] nav  [Enter] select  [/] search  [r] refresh  [c] clear  [q] quit\n'
+        if [ -f "${DATA_DIR}/status2.disabled" ]; then
+            status2_indicator="[n] status2:off"
+        else
+            status2_indicator="[n] status2:on"
+        fi
+        printf '\n  [jk] nav  [Enter] select  [/] search  [r] refresh  [c] clear  %s  [q] quit\n' "$status2_indicator"
     fi
 }
 
@@ -523,13 +521,22 @@ while true; do
             clamp_cursor
             render
             ;;
+        n|N)  # Toggle persistent second status bar
+            if [ -f "${DATA_DIR}/status2.disabled" ]; then
+                rm -f "${DATA_DIR}/status2.disabled"
+            else
+                touch "${DATA_DIR}/status2.disabled"
+            fi
+            tmux refresh-client -S 2>/dev/null || true
+            render
+            ;;
         i)  # Detail view
             if [ "$DISPLAY_COUNT" -gt 0 ]; then
                 DETAIL_MODE=1
                 render
             fi
             ;;
-        [1-9a-bd-hl-ps-z])  # Direct key shortcuts (excluding c,i,j,k,q,r)
+        [1-9a-bd-hl-ps-z])  # Direct key shortcuts (excluding c,i,j,k,n,q,r)
             pos="$(key_to_pos "$key" 2>/dev/null)" || continue
             [ -n "$pos" ] && [ "$pos" -ge 1 ] && [ "$pos" -le "$DISPLAY_COUNT" ] && goto_entry "$pos"
             ;;
