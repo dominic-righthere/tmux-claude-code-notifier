@@ -338,8 +338,9 @@ render() {
         else
             printf '\n    No active sessions.\n'
         fi
-        # Footer pinned to bottom
-        printf '\033[%d;1H' "$rows"
+        # Pad to bottom then print footer
+        local pad=$(( rows - 4 ))
+        local p; for p in $(seq 1 "$pad"); do printf '\n'; done
         if [ "$SEARCH_MODE" -eq 1 ]; then
             printf '  /%s_' "$SEARCH_QUERY"
         else
@@ -373,29 +374,37 @@ render() {
         lines_used=$(( lines_used + 1 ))
     done
 
-    # Scroll indicators just above footer
+    # Scroll indicator line (counts as 1 printed line)
     local last_visible=$(( SCROLL_OFFSET + lines_used - 1 ))
-    local indicator_row=$(( rows - 1 ))
+    local scroll_line=""
     if [ "$SCROLL_OFFSET" -gt 1 ] && [ "$last_visible" -lt "$DISPLAY_COUNT" ]; then
-        printf '\033[%d;1H' "$indicator_row"
-        printf '  \033[90m▲ %d above  ▼ %d below\033[0m' \
-            "$(( SCROLL_OFFSET - 1 ))" "$(( DISPLAY_COUNT - last_visible ))"
+        scroll_line="  \033[90m▲ $(( SCROLL_OFFSET - 1 )) above  ▼ $(( DISPLAY_COUNT - last_visible )) below\033[0m"
     elif [ "$SCROLL_OFFSET" -gt 1 ]; then
-        printf '\033[%d;1H' "$indicator_row"
-        printf '  \033[90m▲ %d more above\033[0m' "$(( SCROLL_OFFSET - 1 ))"
+        scroll_line="  \033[90m▲ $(( SCROLL_OFFSET - 1 )) more above\033[0m"
     elif [ "$last_visible" -lt "$DISPLAY_COUNT" ]; then
-        printf '\033[%d;1H' "$indicator_row"
-        printf '  \033[90m▼ %d more below\033[0m' "$(( DISPLAY_COUNT - last_visible ))"
+        scroll_line="  \033[90m▼ $(( DISPLAY_COUNT - last_visible )) more below\033[0m"
     fi
 
-    # Footer pinned to bottom row
+    # Total lines printed so far: 1 header + lines_used + 1 scroll (if any) + 1 footer
+    local printed=$(( 1 + lines_used ))
+    [ -n "$scroll_line" ] && printed=$(( printed + 1 ))
+    local footer_lines=1
+    local padding=$(( rows - printed - footer_lines ))
+
+    # Print scroll indicator
+    [ -n "$scroll_line" ] && printf '%b\n' "$scroll_line"
+
+    # Pad remaining space
+    local p
+    for p in $(seq 1 "$padding"); do printf '\n'; done
+
+    # Footer on last line
     local status2_indicator
     if [ -f "${DATA_DIR}/status2.disabled" ]; then
         status2_indicator="[n] status2:off"
     else
         status2_indicator="[n] status2:on"
     fi
-    printf '\033[%d;1H' "$rows"
     if [ "$SEARCH_MODE" -eq 1 ]; then
         printf '  /%s_' "$SEARCH_QUERY"
     else
