@@ -269,7 +269,7 @@ render_entry() {
     [ "$show_wname" -eq 1 ] && printf '  %-*s' "$wname_w" "$wname"
     [ "$show_msg" -eq 1 ] && printf '  %-*s' "$msg_w" "$msg"
     printf '  %5s' "$rel"
-    [ "$is_selected" -eq 1 ] && printf '\033[0m'
+    [ "$is_selected" -eq 1 ] && printf '\033[K\033[0m'  # extend highlight to EOL
     printf '\n'
 }
 
