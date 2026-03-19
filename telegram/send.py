@@ -6,9 +6,7 @@ CLI: python -m telegram send <type> <session> <window> <message> [tool_name]
 from __future__ import annotations
 
 import logging
-import re
 import sys
-import time
 from pathlib import Path
 
 from telegram import api, db, state, tmux
@@ -25,10 +23,15 @@ def send_notification(
     window: str,
     message: str = "",
     tool_name: str = "",
+    permission_mode: str = "",
 ) -> None:
     """Main entry point: build and send a Telegram notification."""
     config = state.load_config()
     if not config:
+        return
+
+    if state.is_muted():
+        db.log_event(src="send", event="not_sent", type=event_type.value, session=session, window=window, tool=tool_name)
         return
 
     msg_key = state.make_msg_key(session, window)
@@ -38,7 +41,7 @@ def send_notification(
         tool_name = ""
 
     # Early trace
-    db.log_event(src="send", event="enter", type=event_type.value, session=session, window=window, tool=tool_name)
+    db.log_event(src="send", event="enter", type=event_type.value, session=session, window=window, tool=tool_name, extra=f"permission_mode={permission_mode}")
 
     # Get project name
     project_name = ""
@@ -50,35 +53,24 @@ def send_notification(
     raw_context = ""
     raw_pre_chrome = ""
     pw = 120
-    mode = detect_mode("")
+    mode = ModeInfo()
 
     if event_type != EventType.PROMPT:
-        # Finished needs more time — final speech renders after Stop hook fires
-        delay = 1.0 if event_type == EventType.FINISHED else 0.3
-        time.sleep(delay)
+        # Poll until terminal finishes rendering (lightweight, native width)
+        if event_type == EventType.FINISHED:
+            tmux.poll_for_render(session, window, timeout=3.0, initial_delay=0.3)
+        else:
+            tmux.poll_for_render(session, window, timeout=2.0, initial_delay=0.2)
+        # Full capture at configured width
         captured, pw = tmux.capture_wide(session, window)
         if captured:
+            # Option extraction needs un-ghosted text (dim = unselected options)
+            raw_pre_chrome = strip_ansi(captured)
             captured = strip_ghost_text(captured)
             raw_context = strip_ansi(captured)
-            mode = detect_mode(raw_context)  # before chrome strip (needs ⏵⏵)
-            raw_pre_chrome = raw_context  # save for option extraction (separators intact)
+            mode = detect_mode(raw_context)  # for display label (plan mode, etc.)
             raw_context = strip_terminal_chrome(raw_context)
             raw_context = trim_blank_lines(raw_context)
-
-    # Override auto mode if pane shows a manual-approval prompt
-    # (dangerous commands require approval even in auto-accept mode)
-    if mode.auto and raw_pre_chrome:
-        tail = raw_pre_chrome.splitlines()[-30:]
-        if any(re.search(r'❯\s+[1-4]\.\s+\w', line) for line in tail):
-            mode = ModeInfo(label=mode.label, auto=False)
-
-    # Skip waiting in auto-accept mode
-    if event_type == EventType.WAITING and mode.auto:
-        db.log_event(
-            src="send", event="skip_auto", type=event_type.value,
-            session=session, window=window, extra=f"mode={mode.label}",
-        )
-        return
 
     # Log context
     if raw_context:
@@ -110,10 +102,12 @@ def send_notification(
     payload = build_message(ctx)
     keyboard_dict = payload.keyboard.to_dict()
 
+    ctx_len = len(raw_context) if raw_context else 0
+    pre_len = len(raw_pre_chrome) if raw_pre_chrome else 0
     db.log_event(
         src="send", event="keyboard", type=event_type.value,
         session=session, window=window, action=payload.kb_style.value,
-        extra=f"tool={tool_name} options={len(payload.keyboard.inline_keyboard) - 1 if payload.kb_style.value == 'options' else 0}",
+        extra=f"tool={tool_name} options={len(payload.keyboard.inline_keyboard) - 1 if payload.kb_style.value == 'options' else 0} ctx_len={ctx_len} pre_len={pre_len}",
     )
 
     # Send or edit
@@ -148,6 +142,14 @@ def _send_or_edit(
                 session=session, window=window, msg_id=prev.msg_id,
                 extra="prev_type=waiting",
             )
+        # Type guard: don't edit a finished message with a waiting message
+        elif prev.type == "finished" and event_type == EventType.WAITING:
+            api.strip_buttons(config, prev.msg_id)
+            db.log_event(
+                src="send", event="strip_finished", type=event_type.value,
+                session=session, window=window, msg_id=prev.msg_id,
+                extra="prev_type=finished",
+            )
         else:
             # Try to edit in-place
             if api.edit_message(config, prev.msg_id, text, keyboard):
@@ -181,7 +183,7 @@ def _send_or_edit(
 def cli_main(args: list[str]) -> None:
     """CLI entry point matching telegram-send.sh interface:
 
-    <type> <session> <window> <message> [tool_name]
+    <type> <session> <window> <message> [tool_name] [permission_mode]
     """
     logging.basicConfig(
         level=logging.WARNING,
@@ -196,6 +198,7 @@ def cli_main(args: list[str]) -> None:
     window = args[2] if len(args) > 2 else ""
     message = args[3] if len(args) > 3 else ""
     tool_name = args[4] if len(args) > 4 else ""
+    permission_mode = args[5] if len(args) > 5 else ""
 
     # Unescape JSON string sequences from bash extract_json_value
     if message:
@@ -208,7 +211,7 @@ def cli_main(args: list[str]) -> None:
         return
 
     try:
-        send_notification(event_type, session, window, message, tool_name)
+        send_notification(event_type, session, window, message, tool_name, permission_mode)
     except Exception:
         logger.exception("send_notification failed")
         sys.exit(1)

@@ -7,6 +7,7 @@ import asyncio
 from telegram.bot import (
     BotHandler,
     MAX_SEND_TEXT_LEN,
+    _clean_pane_for_file,
     _clean_pane_for_view,
     _resolve_target,
     parse_command,
@@ -321,10 +322,10 @@ class TestCleanPaneForViewGhostText:
 
 
 class TestCaptureWide:
-    """Test capture_wide resizes pane, captures, and restores."""
+    """Test capture_wide captures at native width (no resize)."""
 
-    def test_resize_capture_restore(self, monkeypatch):
-        """Calls resize → capture → restore in order."""
+    def test_captures_at_native_width(self, monkeypatch):
+        """Returns captured content and native pane width."""
         calls = []
 
         def fake_run_tmux(*args, **kw):
@@ -336,63 +337,44 @@ class TestCaptureWide:
             return ""
 
         monkeypatch.setattr("telegram.tmux.run_tmux", fake_run_tmux)
-        monkeypatch.setattr("telegram.tmux.time.sleep", lambda _: None)
 
         text, width = capture_wide("s", "0")
         assert text == "captured content"
-        assert width == 250
+        assert width == 80
 
-        # Verify order: display-message (pane_width), resize wide, capture, resize restore
+        # Only display-message (pane_width) and capture-pane — no resize
         ops = [c[0] for c in calls]
-        assert ops == ["display-message", "resize-pane", "capture-pane", "resize-pane"]
+        assert ops == ["display-message", "capture-pane"]
 
-        # First resize sets width=250, second restores to 80
-        resize_calls = [c for c in calls if c[0] == "resize-pane"]
-        assert resize_calls[0][-1] == "250"
-        assert resize_calls[1][-1] == "80"
-
-    def test_resize_failure_returns_original_width(self, monkeypatch):
-        """When resize fails, returns original pane width."""
+    def test_returns_default_width_on_failure(self, monkeypatch):
+        """When pane_width fails, returns default 120."""
         def fake_run_tmux(*args, **kw):
             if args[0] == "display-message":
-                return "100\n"
-            if args[0] == "resize-pane":
-                return None  # resize fails
+                return None  # pane_width fails
             if args[0] == "capture-pane":
                 return "content"
             return ""
 
         monkeypatch.setattr("telegram.tmux.run_tmux", fake_run_tmux)
-        monkeypatch.setattr("telegram.tmux.time.sleep", lambda _: None)
 
         text, width = capture_wide("s", "0")
         assert text == "content"
-        assert width == 100
+        assert width == 120  # default fallback
 
-    def test_capture_works_when_resize_fails(self, monkeypatch):
-        """Graceful degradation: capture still works if resize fails."""
-        calls = []
-
+    def test_capture_none_returns_none(self, monkeypatch):
+        """Returns None text when capture fails."""
         def fake_run_tmux(*args, **kw):
-            calls.append(args)
             if args[0] == "display-message":
-                return "120\n"
-            if args[0] == "resize-pane":
-                return None
+                return "200\n"
             if args[0] == "capture-pane":
-                return "still captured"
+                return None
             return ""
 
         monkeypatch.setattr("telegram.tmux.run_tmux", fake_run_tmux)
-        monkeypatch.setattr("telegram.tmux.time.sleep", lambda _: None)
 
         text, width = capture_wide("s", "0")
-        assert text == "still captured"
-        assert width == 120
-
-        # No restore resize should be attempted
-        resize_calls = [c for c in calls if c[0] == "resize-pane"]
-        assert len(resize_calls) == 1  # only the failed attempt
+        assert text is None
+        assert width == 200
 
 
 class TestCmdDoctor:
@@ -446,6 +428,229 @@ class TestCmdDoctor:
         asyncio.run(handler.cmd_doctor())
 
         assert "All checks passed." in sent[0]
+
+
+class TestCleanPaneForFile:
+    """Test _clean_pane_for_file preserves formatting and uses 200-line limit."""
+
+    def test_no_reflow_preserves_long_lines(self):
+        """Long lines should not be reflowed or wrapped."""
+        long_line = "x" * 200
+        raw = f"❯ task\n{long_line}\nmore\nline3\nline4\nline5"
+        result = _clean_pane_for_file(raw, 120)
+        assert long_line in result
+
+    def test_no_table_conversion(self):
+        """Tables should be preserved as-is."""
+        raw = "\n".join([
+            "❯ task",
+            "| Col1 | Col2 |",
+            "|------|------|",
+            "| a    | b    |",
+            "line4",
+            "line5",
+            "line6",
+        ])
+        result = _clean_pane_for_file(raw, 120)
+        assert "| Col1 | Col2 |" in result
+
+    def test_limits_to_200_lines(self):
+        lines = ["❯ task"] + [f"line {i}" for i in range(250)]
+        raw = "\n".join(lines)
+        result = _clean_pane_for_file(raw, 120)
+        result_lines = result.splitlines()
+        assert len(result_lines) <= 200
+
+    def test_scopes_to_last_prompt(self):
+        raw = "\n".join([
+            "❯ first task",
+            "old output",
+            "❯ second task",
+            "new output",
+            "line2",
+            "line3",
+            "line4",
+            "line5",
+        ])
+        result = _clean_pane_for_file(raw, 120)
+        assert "new output" in result
+        assert "old output" not in result
+
+    def test_returns_plain_text(self):
+        """Output should not be HTML-escaped."""
+        raw = "❯ task\n<b>bold</b> & stuff\nline2\nline3\nline4\nline5"
+        result = _clean_pane_for_file(raw, 120)
+        assert "<b>bold</b>" in result
+        assert "&amp;" not in result
+
+
+class TestSendViewDocument:
+    """Test _send_view sends HTML document instead of inline message."""
+
+    def test_sends_document_with_content(self, monkeypatch):
+        """_send_view should call async_send_document with .html file."""
+        doc_calls: list[dict] = []
+        config = TelegramConfig(bot_token="fake", chat_id="123")
+        handler = BotHandler(config, "/tmp")
+
+        async def fake_send_document(cfg, filename, content, caption="", reply_markup=None):
+            doc_calls.append({"filename": filename, "content": content, "caption": caption})
+            return "1"
+
+        monkeypatch.setattr("telegram.api.async_send_document", fake_send_document)
+        monkeypatch.setattr(
+            "telegram.bot._get_session_info",
+            lambda s, w: {"project": "myapp", "mode": "", "mode_icon": "", "task": ""},
+        )
+
+        raw = "\n".join(["❯ do work", "output line 1", "output line 2", "line 3", "line 4", "line 5"])
+        asyncio.run(handler._send_view("main", "0", raw, 120))
+
+        assert len(doc_calls) == 1
+        assert doc_calls[0]["filename"] == "myapp.html"
+        assert b"output line 1" in doc_calls[0]["content"]
+        assert b"<!DOCTYPE html>" in doc_calls[0]["content"]
+        assert "myapp" in doc_calls[0]["caption"]
+
+    def test_empty_output_sends_text_message(self, monkeypatch):
+        """Empty pane sends a regular text message, not a document."""
+        sent: list[str] = []
+        config = TelegramConfig(bot_token="fake", chat_id="123")
+        handler = BotHandler(config, "/tmp")
+
+        async def fake_send(text, reply_markup=None):
+            sent.append(text)
+            return "1"
+
+        handler.send = fake_send
+
+        asyncio.run(handler._send_view("main", "0", "", 120))
+        assert len(sent) == 1
+        assert "(empty)" in sent[0]
+
+    def test_uses_session_name_when_no_project(self, monkeypatch):
+        """Filename falls back to session name when project is empty."""
+        doc_calls: list[dict] = []
+        config = TelegramConfig(bot_token="fake", chat_id="123")
+        handler = BotHandler(config, "/tmp")
+
+        async def fake_send_document(cfg, filename, content, caption="", reply_markup=None):
+            doc_calls.append({"filename": filename})
+            return "1"
+
+        monkeypatch.setattr("telegram.api.async_send_document", fake_send_document)
+        monkeypatch.setattr(
+            "telegram.bot._get_session_info",
+            lambda s, w: {"project": "", "mode": "", "mode_icon": "", "task": ""},
+        )
+
+        raw = "\n".join(["❯ task", "output", "line2", "line3", "line4", "line5"])
+        asyncio.run(handler._send_view("dev-session", "0", raw, 120))
+
+        assert doc_calls[0]["filename"] == "dev-session.html"
+
+
+class TestCmdSessions:
+    """Test /s command behavior."""
+
+    def _make_handler(self, monkeypatch):
+        """Create a BotHandler with mocked send/edit/delete."""
+        sent: list[dict] = []
+        edited: list[dict] = []
+        deleted: list[str] = []
+        config = TelegramConfig(bot_token="fake", chat_id="123")
+        handler = BotHandler(config, "/tmp")
+
+        async def fake_send(text, reply_markup=None):
+            msg_id = str(90000 + len(sent))
+            sent.append({"text": text, "reply_markup": reply_markup, "msg_id": msg_id})
+            return msg_id
+
+        async def fake_edit(msg_id, text, reply_markup=None):
+            edited.append({"msg_id": msg_id, "text": text, "reply_markup": reply_markup})
+            return True
+
+        async def fake_delete(cfg, msg_id):
+            deleted.append(msg_id)
+            return True
+
+        handler.send = fake_send
+        handler.edit = fake_edit
+        monkeypatch.setattr("telegram.api.async_delete_message", fake_delete)
+
+        sessions = [
+            {"idx": 1, "session": "traefik-hub", "window": "0", "category": "working", "message": "Working..."},
+            {"idx": 2, "session": "career", "window": "1", "category": "waiting", "message": "Bash: ls"},
+            {"idx": 3, "session": "ai-browser", "window": "0", "category": "idle", "message": "Idle"},
+        ]
+        monkeypatch.setattr("telegram.bot._build_session_list", lambda: sessions)
+        monkeypatch.setattr("telegram.bot._get_session_info", lambda s, w: {
+            "project": s, "mode": "", "mode_icon": "", "task": "",
+        })
+        monkeypatch.setattr("telegram.bot.state.is_muted", lambda: False)
+
+        return handler, sent, edited, deleted
+
+    def test_sessions_deletes_old_sends_new(self, monkeypatch):
+        """Default /s deletes old message, sends new one."""
+        handler, sent, edited, deleted = self._make_handler(monkeypatch)
+
+        handler.last_sessions_msg_id = "old_123"
+        asyncio.run(handler.cmd_sessions())
+
+        assert deleted == ["old_123"]
+        assert len(sent) == 1
+        assert handler.last_sessions_msg_id == sent[0]["msg_id"]
+
+    def test_sessions_refresh_edits_in_place(self, monkeypatch):
+        """Refresh callback passes edit_msg_id, edits in-place."""
+        handler, sent, edited, deleted = self._make_handler(monkeypatch)
+
+        asyncio.run(handler.cmd_sessions(edit_msg_id="cb_456"))
+
+        assert len(edited) == 1
+        assert edited[0]["msg_id"] == "cb_456"
+        assert len(sent) == 0
+        assert len(deleted) == 0
+        assert handler.last_sessions_msg_id == "cb_456"
+
+    def test_sessions_index_in_text(self, monkeypatch):
+        """Session text includes numeric index prefixes."""
+        handler, sent, edited, deleted = self._make_handler(monkeypatch)
+
+        asyncio.run(handler.cmd_sessions())
+
+        text = sent[0]["text"]
+        assert "\n1 ⟳" in text
+        assert "\n2 ⏳" in text
+        assert "\n3 ○" in text
+
+    def test_sessions_compact_buttons(self, monkeypatch):
+        """Waiting sessions get compact numbered buttons, idle sessions get none."""
+        handler, sent, edited, deleted = self._make_handler(monkeypatch)
+
+        asyncio.run(handler.cmd_sessions())
+
+        kb = sent[0]["reply_markup"]
+        rows = kb["inline_keyboard"]
+        # waiting session (idx=2) should have [✅ 2] [❌ 2] [📋 2] [💬 2]
+        waiting_row = [r for r in rows if any("approve:" in b.get("callback_data", "") for b in r)]
+        assert len(waiting_row) == 1
+        assert waiting_row[0][0]["text"] == "✅ 2"
+        assert waiting_row[0][1]["text"] == "❌ 2"
+
+        # working session (idx=1) should have [📋 1] [💬 1]
+        working_row = [r for r in rows if any("view:traefik-hub:" in b.get("callback_data", "") for b in r)]
+        assert len(working_row) == 1
+        assert working_row[0][0]["text"] == "📋 1"
+        assert working_row[0][1]["text"] == "💬 1"
+
+        # idle session (idx=3) should have no buttons
+        idle_row = [r for r in rows if any("ai-browser" in b.get("callback_data", "") for b in r)]
+        assert len(idle_row) == 0
+
+        # Last row should be Refresh
+        assert rows[-1][0]["text"] == "🔄 Refresh"
 
 
 class TestMaxSendTextLen:

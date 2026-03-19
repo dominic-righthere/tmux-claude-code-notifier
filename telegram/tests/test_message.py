@@ -426,6 +426,183 @@ class TestMCPToolPermissionPrompt:
         # Should NOT fall back to blockquote
         assert "<blockquote" not in payload.text
 
+    def test_bash_permission_with_yes_no_options(self):
+        """Bash permission with real Yes/No options should get OPTIONS, not APPROVE_DENY."""
+        raw = "\n".join([
+            "⏺ Bash(rm -f /tmp/test.jsonl)",
+            "  ⎿  Running…",
+            "───────────────────────────────────────────────",
+            "",
+            "  Bash command",
+            "  rm -f /tmp/test.jsonl",
+            "",
+            "  Do you want to proceed?",
+            "  ❯ 1. Yes",
+            "    2. Yes, and always allow access to tmp/ from this project",
+            "    3. No",
+            "Esc to cancel · Tab to amend",
+        ])
+        ctx = SendContext(
+            event_type=EventType.WAITING,
+            session="main",
+            window="1",
+            tool_name="Bash",
+            raw_context=raw,
+            raw_pre_chrome=raw,
+        )
+        _, style = build_keyboard(ctx)
+        assert style == KeyboardStyle.OPTIONS
+
+    def test_exit_plan_mode_picks_up_options(self):
+        """ExitPlanMode with numbered options should get OPTIONS keyboard."""
+        raw = "\n".join([
+            "⏺ Here is my plan:",
+            "  Verification",
+            "  1. Should print 10 pass results",
+            "  2. Check has no leftover test files",
+            "  3. Run test.sh to confirm existing tests still pass",
+            "  4. Run pytest to confirm Python tests still pass",
+            "  Yes, auto-accept edits",
+            "  Yes, manually approve edits",
+            "  ~/.claude/plans/elegant-spinning-pizza.md",
+        ])
+        ctx = SendContext(
+            event_type=EventType.WAITING,
+            session="main",
+            window="1",
+            tool_name="ExitPlanMode",
+            raw_context=raw,
+            raw_pre_chrome=raw,
+        )
+        _, style = build_keyboard(ctx)
+        assert style == KeyboardStyle.OPTIONS
+
+    def test_unnumbered_permission_choices(self):
+        """Edit/Bash permission prompts with unnumbered Yes/No choices."""
+        raw = "\n".join([
+            "⏺ Update(telegram/tmux.py)",
+            "  ⎿  Added 2 lines, removed 2 lines",
+            " Do you want to make this edit to tmux.py?",
+            "    Yes (Recommended)",
+            "    Yes, allow all edits during this session",
+            "    No",
+            "",
+            "       amend",
+        ])
+        options = _extract_options("", raw)
+        assert len(options) == 3
+        assert options[0] == ("1", "Yes (Recommended)")
+        assert options[1] == ("2", "Yes, allow all edits during this session")
+        assert options[2] == ("3", "No")
+
+    def test_unnumbered_permission_with_cursor(self):
+        """Permission prompt with cursor marker on selected option."""
+        raw = "\n".join([
+            "⏺ Bash(rm -f /tmp/test.txt)",
+            " Do you want to run this command?",
+            "    ❯ Yes (Recommended)",
+            "    Yes, and don't ask again for this session",
+            "    No",
+        ])
+        options = _extract_options("", raw)
+        assert len(options) == 3
+        assert options[0] == ("1", "Yes (Recommended)")
+        assert options[1][1].startswith("Yes, and")
+        assert options[2] == ("3", "No")
+
+    def test_unnumbered_permission_keyboard_is_options(self):
+        """Unnumbered permission choices should produce OPTIONS keyboard."""
+        raw = "\n".join([
+            "⏺ Update(models.py)",
+            " Do you want to make this edit to models.py?",
+            "    Yes (Recommended)",
+            "    Yes, allow all edits during this session",
+            "    No",
+        ])
+        ctx = SendContext(
+            event_type=EventType.WAITING,
+            session="main",
+            window="1",
+            tool_name="Edit",
+            raw_context="",
+            raw_pre_chrome=raw,
+        )
+        _, style = build_keyboard(ctx)
+        assert style == KeyboardStyle.OPTIONS
+
+    def test_ask_user_question_with_meta_options_below_separator(self):
+        """Options 1-4 above separator, meta options 5-6 below — should capture 1-4."""
+        pre_chrome = "\n".join([
+            "⏺ Good question. Let me clarify.",
+            "☐ Auth flow",
+            "What kind of login flow?",
+            "❯ 1. CloudFormation Quick Create link",
+            "     Generate a URL that opens AWS Console.",
+            "  2. AWS SSO / IAM Identity Center",
+            "     Show a device code, user authenticates via SSO.",
+            "  3. Manual key entry in UI",
+            "     User pastes an Access Key ID + Secret.",
+            "  4. Type something.",
+            "───────────────────────────────────────",
+            "  5. Chat about this",
+            "  6. Skip interview and plan immediately",
+            "Enter to select · ↑/↓ to navigate · Esc to cancel",
+        ])
+        options = _extract_options("", pre_chrome)
+        assert len(options) == 4
+        assert options[0] == ("1", "CloudFormation Quick Create link")
+        assert options[1] == ("2", "AWS SSO / IAM Identity Center")
+        assert options[2] == ("3", "Manual key entry in UI")
+        assert options[3] == ("4", "Type something.")
+
+    def test_cross_separator_single_meta_option(self):
+        """4 options above separator, 1 meta option below — should extract all 5."""
+        pre_chrome = "\n".join([
+            "⏺ Which database driver should we use?",
+            "☐ Database",
+            "Which driver?",
+            "❯ 1. PostgreSQL native (pg)",
+            "     Direct connection, best performance.",
+            "  2. Prisma ORM",
+            "     Type-safe queries, migrations built-in.",
+            "  3. Drizzle ORM",
+            "     Lightweight, SQL-like syntax.",
+            "  4. Raw SQL with connection pool",
+            "───────────────────────────────────────",
+            "  5. Chat about this",
+            "Enter to select · ↑/↓ to navigate · Esc to cancel",
+        ])
+        options = _extract_options("", pre_chrome)
+        assert len(options) == 4
+        assert options[0] == ("1", "PostgreSQL native (pg)")
+        assert options[1] == ("2", "Prisma ORM")
+        assert options[2] == ("3", "Drizzle ORM")
+        assert options[3] == ("4", "Raw SQL with connection pool")
+
+    def test_option_label_truncation(self):
+        """Option labels > 30 chars are truncated with ellipsis."""
+        raw = "\n".join([
+            "⏺ Pick one:",
+            "  1. Short",
+            "  2. This is a very long option label that exceeds thirty characters",
+        ])
+        ctx = SendContext(
+            event_type=EventType.WAITING,
+            session="main",
+            window="1",
+            raw_context=raw,
+        )
+        kb, style = build_keyboard(ctx)
+        assert style == KeyboardStyle.OPTIONS
+        labels = [b.text for row in kb.inline_keyboard for b in row]
+        # "2. This is a very long option..." should be truncated
+        long_label = [l for l in labels if l.startswith("2.")][0]
+        assert len(long_label) <= 30
+        assert long_label.endswith("…")
+        # Short label should be unchanged
+        short_label = [l for l in labels if l.startswith("1.")][0]
+        assert short_label == "1. Short"
+
     def test_body_without_pre_chrome_falls_back(self):
         """Without raw_pre_chrome, no separator → fallback to blockquote."""
         ctx = SendContext(

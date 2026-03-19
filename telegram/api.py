@@ -63,6 +63,48 @@ def _api_call(config: TelegramConfig, method: str, data: dict[str, Any]) -> dict
         return None
 
 
+def _api_call_multipart(
+    config: TelegramConfig, method: str, data: dict[str, Any], files: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Make a synchronous multipart Telegram API call (for file uploads)."""
+    from telegram.mock import is_mock_enabled, mock_api_call
+    if is_mock_enabled():
+        return mock_api_call(method, {**data, "document": files.get("document", ("",))[0]})
+
+    url = f"{config.api_base}/{method}"
+    try:
+        resp = _get_client().post(url, data=data, files=files)
+        result = resp.json()
+        if result.get("ok"):
+            return result
+        logger.warning("API %s failed: %s", method, result.get("description", "unknown"))
+        return result
+    except Exception:
+        logger.exception("API call %s failed", method)
+        return None
+
+
+async def _async_api_call_multipart(
+    config: TelegramConfig, method: str, data: dict[str, Any], files: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Make an async multipart Telegram API call (for file uploads)."""
+    from telegram.mock import is_mock_enabled, mock_api_call
+    if is_mock_enabled():
+        return mock_api_call(method, {**data, "document": files.get("document", ("",))[0]})
+
+    url = f"{config.api_base}/{method}"
+    try:
+        resp = await _get_async_client().post(url, data=data, files=files)
+        result = resp.json()
+        if result.get("ok"):
+            return result
+        logger.warning("API %s failed: %s", method, result.get("description", "unknown"))
+        return result
+    except Exception:
+        logger.exception("API call %s failed", method)
+        return None
+
+
 async def _async_api_call(config: TelegramConfig, method: str, data: dict[str, Any]) -> dict[str, Any] | None:
     """Make an async Telegram API call.
 
@@ -159,6 +201,32 @@ def set_my_commands(config: TelegramConfig, commands: list[dict[str, str]]) -> b
     return bool(result and result.get("ok"))
 
 
+def send_document(
+    config: TelegramConfig,
+    filename: str,
+    content: bytes,
+    caption: str = "",
+    reply_markup: dict | None = None,
+) -> str | None:
+    """Send a document. Returns message_id or None."""
+    data: dict[str, Any] = {
+        "chat_id": int(config.chat_id),
+        "parse_mode": "HTML",
+    }
+    if caption:
+        data["caption"] = caption
+    if reply_markup:
+        import json
+        data["reply_markup"] = json.dumps(reply_markup)
+
+    mime = "text/html" if filename.endswith(".html") else "text/plain"
+    files = {"document": (filename, content, mime)}
+    result = _api_call_multipart(config, "sendDocument", data, files)
+    if result and result.get("ok"):
+        return str(result["result"]["message_id"])
+    return None
+
+
 # ─── Async API methods (used by bot.py) ──────────────────────────────────────
 
 
@@ -202,6 +270,15 @@ async def async_edit_message(
     return bool(result and result.get("ok"))
 
 
+async def async_delete_message(config: TelegramConfig, message_id: str) -> bool:
+    """Async delete a message. Returns True on success."""
+    result = await _async_api_call(config, "deleteMessage", {
+        "chat_id": int(config.chat_id),
+        "message_id": int(message_id),
+    })
+    return bool(result and result.get("ok"))
+
+
 async def async_strip_buttons(config: TelegramConfig, message_id: str) -> None:
     """Async remove inline keyboard."""
     await _async_api_call(config, "editMessageReplyMarkup", {
@@ -217,6 +294,32 @@ async def async_answer_callback(config: TelegramConfig, callback_id: str, text: 
         "callback_query_id": callback_id,
         "text": text,
     })
+
+
+async def async_send_document(
+    config: TelegramConfig,
+    filename: str,
+    content: bytes,
+    caption: str = "",
+    reply_markup: dict | None = None,
+) -> str | None:
+    """Async send a document. Returns message_id or None."""
+    data: dict[str, Any] = {
+        "chat_id": int(config.chat_id),
+        "parse_mode": "HTML",
+    }
+    if caption:
+        data["caption"] = caption
+    if reply_markup:
+        import json
+        data["reply_markup"] = json.dumps(reply_markup)
+
+    mime = "text/html" if filename.endswith(".html") else "text/plain"
+    files = {"document": (filename, content, mime)}
+    result = await _async_api_call_multipart(config, "sendDocument", data, files)
+    if result and result.get("ok"):
+        return str(result["result"]["message_id"])
+    return None
 
 
 async def async_get_updates(config: TelegramConfig, offset: int = 0, timeout: int = 30) -> list[dict] | None:

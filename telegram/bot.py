@@ -15,11 +15,12 @@ import sys
 from pathlib import Path
 
 from telegram import api, db, state, tmux
-from telegram.models import TelegramConfig
+from telegram.message import build_message
+from telegram.models import EventType, ModeInfo, SendContext, TelegramConfig
 from telegram.tmux import validate_target
 from telegram.parse import (
     convert_tables_to_bullets,
-    extract_preview,
+    detect_mode,
     html_escape,
     reflow_for_telegram,
     strip_ansi,
@@ -38,7 +39,7 @@ LOG_FILE = DATA_DIR / "telegram.log"
 MAX_SEND_TEXT_LEN = 4000
 
 # Actions that require session:window target
-_TARGETED_ACTIONS = {"approve", "deny", "opt", "view", "prompt", "mode"}
+_TARGETED_ACTIONS = {"approve", "deny", "opt", "view", "prompt", "mode", "refresh"}
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -200,6 +201,73 @@ def _clean_pane_for_view(raw: str, pw: int) -> str:
     return trim_blank_lines(text)
 
 
+def _clean_pane_for_file(raw: str, pw: int) -> str:
+    """Clean captured pane output for the .txt document View handler.
+
+    Like _clean_pane_for_view but preserves original formatting:
+    no reflow, no wrap, no table conversion. Keeps 200 lines.
+    Returns plain text (no HTML escaping).
+    """
+    text = strip_ghost_text(raw)
+    text = strip_ansi(text)
+    text = strip_terminal_chrome(text)
+
+    # Scope to current work block: everything after last ❯ line.
+    lines = text.splitlines()
+    prompt_indices: list[int] = []
+    for i, line in enumerate(lines):
+        if re.match(r"^\s*❯\s+", line):
+            prompt_indices.append(i)
+    if prompt_indices:
+        last = prompt_indices[-1]
+        work_block = lines[last:]
+        non_blank = [l for l in work_block if l.strip()]
+        if len(non_blank) < 5 and len(prompt_indices) >= 2:
+            lines = lines[prompt_indices[-2]:]
+        else:
+            lines = work_block
+
+    # Keep last 200 lines
+    if len(lines) > 200:
+        lines = lines[-200:]
+
+    text = "\n".join(lines)
+    return trim_blank_lines(text)
+
+
+def _wrap_html(text: str, title: str) -> str:
+    """Wrap plain text in a minimal dark-themed HTML page."""
+    from telegram.parse import html_escape
+
+    escaped = html_escape(text)
+    return f"""\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{html_escape(title)}</title>
+<style>
+body {{
+  background: #1e1e2e;
+  color: #cdd6f4;
+  font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 0;
+  padding: 16px;
+}}
+pre {{
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  margin: 0;
+}}
+</style>
+</head>
+<body><pre>{escaped}</pre></body>
+</html>"""
+
+
 def _resolve_target(identifier: str, sessions: list[dict] | None = None) -> dict | None:
     """Resolve a session identifier to a session entry.
 
@@ -268,6 +336,8 @@ BOT_COMMANDS = [
     {"command": "mode", "description": "Switch mode (plan/compact/cancel)"},
     {"command": "run", "description": "Run command in session"},
     {"command": "restart", "description": "Restart all Claude sessions"},
+    {"command": "mute", "description": "Mute notifications"},
+    {"command": "unmute", "description": "Unmute notifications"},
     {"command": "doctor", "description": "Run diagnostics"},
     {"command": "help", "description": "Show all commands"},
 ]
@@ -288,6 +358,8 @@ Tap buttons for approve/deny/view/send.
 /mode — Switch mode
 /run — Run shell command
 /restart — Restart all sessions
+/mute — Mute notifications
+/unmute — Unmute notifications
 /doctor — Diagnostics
 
 <b>Examples:</b>
@@ -341,16 +413,30 @@ class BotHandler:
     async def cmd_help(self) -> None:
         await self.send(HELP_TEXT)
 
-    async def cmd_sessions(self) -> None:
+    async def cmd_mute(self) -> None:
+        state.set_muted(True)
+        db.log_event(src="bot", event="mute")
+        await self.send("\U0001f507 Notifications muted")
+
+    async def cmd_unmute(self) -> None:
+        state.set_muted(False)
+        db.log_event(src="bot", event="unmute")
+        await self.send("\U0001f514 Notifications unmuted")
+
+    async def cmd_sessions(self, edit_msg_id: str = "") -> None:
         sessions = _build_session_list()
         if not sessions:
             await self.send("No active Claude Code sessions.")
             return
 
-        text = "<b>Sessions</b>\n"
+        text = "<b>Sessions</b>"
+        if state.is_muted():
+            text += " \U0001f507 <i>Muted</i>"
+        text += "\n"
         keyboard_rows: list[list[dict]] = []
 
         for entry in sessions:
+            idx = entry["idx"]
             cat = entry["category"]
             sess = entry["session"]
             win = entry["window"]
@@ -359,52 +445,54 @@ class BotHandler:
             info = _get_session_info(sess, win)
             icon = _icon_for(cat)
 
-            # Compact line: icon session · project
-            line = f"\n{icon}"
+            # Compact line: idx icon session · project
+            line = f"\n{idx} {icon}"
             if info["mode_icon"]:
                 line += f" {info['mode_icon']}"
             line += f" {sess}"
-            if win != "0":
+            if win not in ("0", "1"):
                 line += f":{win}"
             if info["project"]:
                 line += f" · {info['project']}"
             text += line
 
-            if info["task"]:
-                text += f"\n  {html_escape(info['task'])}"
+            # Task snippet — strip leading "N. " to avoid confusion with idx
+            task = info["task"]
+            if task:
+                task = re.sub(r"^\d+\.\s*", "", task)
+            if task:
+                text += f"\n  {html_escape(task)}"
             elif msg and msg not in ("Idle", "Working..."):
                 text += f"\n  {html_escape(msg)}"
 
-            # Button label
-            btn_label = info["project"][:12] if info["project"] else sess[:12]
-
+            # Compact number-keyed buttons
             if cat == "waiting":
                 keyboard_rows.append([
-                    {"text": f"✅ {btn_label}", "callback_data": f"approve:{sess}:{win}"},
-                    {"text": f"❌ {btn_label}", "callback_data": f"deny:{sess}:{win}"},
-                    {"text": f"📋 {btn_label}", "callback_data": f"view:{sess}:{win}"},
-                ])
-                keyboard_rows.append([
-                    {"text": f"⏹ Cancel", "callback_data": f"mode:{sess}:{win}:esc"},
+                    {"text": f"✅ {idx}", "callback_data": f"approve:{sess}:{win}"},
+                    {"text": f"❌ {idx}", "callback_data": f"deny:{sess}:{win}"},
+                    {"text": f"📋 {idx}", "callback_data": f"view:{sess}:{win}"},
+                    {"text": f"💬 {idx}", "callback_data": f"prompt:{sess}:{win}"},
                 ])
             elif cat == "working":
                 keyboard_rows.append([
-                    {"text": f"📋 {btn_label}", "callback_data": f"view:{sess}:{win}"},
-                    {"text": f"💬 {btn_label}", "callback_data": f"prompt:{sess}:{win}"},
-                    {"text": "⏹", "callback_data": f"mode:{sess}:{win}:esc"},
+                    {"text": f"📋 {idx}", "callback_data": f"view:{sess}:{win}"},
+                    {"text": f"💬 {idx}", "callback_data": f"prompt:{sess}:{win}"},
                 ])
-            else:
-                keyboard_rows.append([
-                    {"text": f"📋 {btn_label}", "callback_data": f"view:{sess}:{win}"},
-                    {"text": f"💬 {btn_label}", "callback_data": f"prompt:{sess}:{win}"},
-                ])
+            # finished/idle: no buttons
 
         keyboard_rows.append([{"text": "🔄 Refresh", "callback_data": "sessions:refresh"}])
         keyboard = {"inline_keyboard": keyboard_rows}
 
-        if self.last_sessions_msg_id:
-            if await self.edit(self.last_sessions_msg_id, text, keyboard):
+        # Refresh callback: edit the message the user is looking at
+        if edit_msg_id:
+            if await self.edit(edit_msg_id, text, keyboard):
+                self.last_sessions_msg_id = edit_msg_id
                 return
+
+        # Default: delete old sessions message, send new one at bottom
+        if self.last_sessions_msg_id:
+            await api.async_delete_message(self.config, self.last_sessions_msg_id)
+            self.last_sessions_msg_id = None
 
         self.last_sessions_msg_id = await self.send(text, keyboard)
 
@@ -422,25 +510,29 @@ class BotHandler:
             return
 
         raw, pw = tmux.capture_wide(sess, win)
-        output = _clean_pane_for_view(raw or "", pw)
+        await self._send_view(sess, win, raw, pw)
+
+    async def _send_view(self, sess: str, win: str, raw: str | None, pw: int) -> None:
+        """Send an HTML document with the pane output."""
+        output = _clean_pane_for_file(raw or "", pw)
 
         if not output:
             await self.send(f"<b>{sess}:{win}</b>\n\n(empty)")
             return
 
         info = _get_session_info(sess, win)
-        header = f"📋 <b>View</b>\n{sess}:{win}"
+        caption = f"📋 {sess}:{win}"
         if info["project"]:
-            header += f" · {info['project']}"
+            caption += f" · {info['project']}"
 
-        preview = html_escape(extract_preview(output, 3))
-
-        if len(output) > 3800:
-            output = "..." + output[len(output) - 3800:]
-        output_escaped = html_escape(output)
-
-        await self.send(
-            f"{header}\n\n{preview}\n\n<blockquote expandable>{output_escaped}</blockquote>"
+        title = f"{info['project'] or sess} — {sess}:{win}"
+        html = _wrap_html(output, title)
+        filename = f"{info['project'] or sess}.html"
+        await api.async_send_document(
+            self.config,
+            filename=filename,
+            content=html.encode("utf-8"),
+            caption=caption,
         )
 
     async def _action(self, sess: str, win: str, keys: list[str], label: str, cb_msg_id: str = "") -> str:
@@ -669,6 +761,10 @@ class BotHandler:
                 await self.cmd_restart(args.strip())
             case "/doctor":
                 await self.cmd_doctor()
+            case "/mute":
+                await self.cmd_mute()
+            case "/unmute":
+                await self.cmd_unmute()
             case _:
                 await self.send("Unknown command. Type /help for available commands.")
 
@@ -699,25 +795,71 @@ class BotHandler:
                     return
 
                 raw, pw = tmux.capture_wide(sess, win)
-                output = _clean_pane_for_view(raw or "", pw)
-
-                if not output:
-                    await self.send(f"<b>{sess}:{win}</b>\n\n(empty)")
+                await self._send_view(sess, win, raw, pw)
+            case "refresh":
+                await api.async_answer_callback(self.config, callback_id, "Refreshing...")
+                err = _check_target(sess, win)
+                if err:
+                    await self.send(err)
                     return
 
-                info = _get_session_info(sess, win)
-                header = f"📋 <b>View</b>\n{sess}:{win}"
-                if info["project"]:
-                    header += f" · {info['project']}"
+                # Determine event type and tool from notification state
+                key = state.make_msg_key(sess, win)
+                notif = state.read_state_file(state.notif_dir() / key)
+                msg_entry = state.read_msg_id(sess, win)
 
-                preview = html_escape(extract_preview(output, 3))
-                if len(output) > 3800:
-                    output = "..." + output[len(output) - 3800:]
+                if msg_entry and msg_entry.type:
+                    try:
+                        event_type = EventType(msg_entry.type)
+                    except ValueError:
+                        event_type = EventType.WAITING
+                elif notif and notif.type == "finished":
+                    event_type = EventType.FINISHED
+                else:
+                    event_type = EventType.WAITING
 
-                await self.send(
-                    f"{header}\n\n{preview}\n\n"
-                    f"<blockquote expandable>{html_escape(output)}</blockquote>"
+                tool_name = ""
+                if notif and notif.message and notif.message.startswith("Waiting: "):
+                    tool_name = notif.message[len("Waiting: "):]
+
+                # Re-capture pane
+                captured, pw = tmux.capture_wide(sess, win)
+
+                raw_context = ""
+                raw_pre_chrome = ""
+                mode = detect_mode("")
+                project_name = ""
+
+                pane_path = tmux.pane_current_path(sess, win)
+                if pane_path:
+                    project_name = Path(pane_path).name
+
+                if captured:
+                    captured = strip_ghost_text(captured)
+                    raw_context = strip_ansi(captured)
+                    mode = detect_mode(raw_context)
+                    raw_pre_chrome = raw_context
+                    raw_context = strip_terminal_chrome(raw_context)
+                    raw_context = trim_blank_lines(raw_context)
+
+                ctx = SendContext(
+                    event_type=event_type,
+                    session=sess,
+                    window=win,
+                    message=notif.message if notif else "",
+                    tool_name=tool_name,
+                    project_name=project_name,
+                    raw_context=raw_context,
+                    raw_pre_chrome=raw_pre_chrome,
+                    pane_width=pw,
+                    mode=mode,
                 )
+
+                payload = build_message(ctx)
+                if cb_msg_id:
+                    await self.edit(cb_msg_id, payload.text, payload.keyboard.to_dict())
+                    db.log_event(src="bot", event="refresh", session=sess, window=win, msg_id=cb_msg_id)
+
             case "prompt":
                 # ForceReply flow: set pending target, send ForceReply message
                 await api.async_answer_callback(self.config, callback_id, "")
@@ -756,7 +898,7 @@ class BotHandler:
                     await api.async_answer_callback(self.config, callback_id, "Failed")
             case "sessions":
                 await api.async_answer_callback(self.config, callback_id, "Refreshing...")
-                await self.cmd_sessions()
+                await self.cmd_sessions(edit_msg_id=cb_msg_id)
             case _:
                 await api.async_answer_callback(self.config, callback_id, "Unknown action")
 

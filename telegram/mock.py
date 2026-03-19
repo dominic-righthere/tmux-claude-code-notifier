@@ -79,6 +79,20 @@ def mock_api_call(method: str, data: dict[str, Any]) -> dict[str, Any]:
                 "date": int(datetime.now().timestamp()),
             },
         }
+    elif method == "sendDocument":
+        msg_id = _next_msg_id()
+        response = {
+            "ok": True,
+            "result": {
+                "message_id": msg_id,
+                "chat": {"id": data.get("chat_id", 0)},
+                "caption": data.get("caption", ""),
+                "document": {"file_name": data.get("document", "")},
+                "date": int(datetime.now().timestamp()),
+            },
+        }
+    elif method == "deleteMessage":
+        response = {"ok": True, "result": True}
     elif method == "answerCallbackQuery":
         response = {"ok": True, "result": True}
     elif method == "getMe":
