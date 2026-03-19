@@ -58,6 +58,7 @@ CURSOR=1  # Currently selected visual position
 SEARCH_QUERY=""
 SEARCH_MODE=0
 DETAIL_MODE=0
+SCROLL_OFFSET=1  # First visible position in display order
 
 # Column width tracking for alignment
 MAX_SESSWIN=0
@@ -150,6 +151,7 @@ load_entries() {
     INDEX=0
     MAX_SESSWIN=0
     MAX_WNAME=0
+    SCROLL_OFFSET=1
 
     # Read active entries (working + idle)
     for f in "$ACTIVE_DIR"/*; do
@@ -316,8 +318,9 @@ section_label() {
 }
 
 render() {
-    local cols
+    local cols rows
     cols=$(tput cols 2>/dev/null || echo 80)
+    rows=$(tput lines 2>/dev/null || echo 24)
     clear
 
     if [ "$DETAIL_MODE" -eq 1 ] && [ "$DISPLAY_COUNT" -gt 0 ]; then
@@ -342,31 +345,51 @@ render() {
         return
     fi
 
-    # Render entries in display order, showing section headers when category changes
-    local last_cat="" pos i cat label
-    for pos in $(seq 1 "$DISPLAY_COUNT"); do
+    # Visible entry budget: rows minus header(1), footer(2), margin(1)
+    local available=$(( rows - 4 ))
+    [ "$available" -lt 3 ] && available=3
+
+    # Render viewport: entries from SCROLL_OFFSET onward, stopping when full
+    local last_cat="" pos i cat label lines_used=0
+    for pos in $(seq "$SCROLL_OFFSET" "$DISPLAY_COUNT"); do
         i="${DISPLAY_ORDER[$pos]}"
         cat="${E_CAT[$i]}"
+
+        # Section label — costs 1 line
         if [ "$cat" != "$last_cat" ]; then
+            [ $(( lines_used + 1 )) -ge "$available" ] && break
             label="$(section_label "$cat")"
             printf '  \033[1m%s\033[0m\n' "$label"
+            lines_used=$(( lines_used + 1 ))
             last_cat="$cat"
         fi
+
+        # Entry row — costs 1 line
+        [ $(( lines_used + 1 )) -gt "$available" ] && break
         render_entry "$pos" "$i" "$cat" "$cols"
+        lines_used=$(( lines_used + 1 ))
     done
+
+    # Scroll indicators
+    if [ "$SCROLL_OFFSET" -gt 1 ]; then
+        printf '  \033[90m▲ %d more above\033[0m\n' "$(( SCROLL_OFFSET - 1 ))"
+    fi
+    local last_visible=$(( SCROLL_OFFSET + lines_used - 1 ))
+    if [ "$last_visible" -lt "$DISPLAY_COUNT" ]; then
+        printf '  \033[90m▼ %d more below\033[0m\n' "$(( DISPLAY_COUNT - last_visible ))"
+    fi
 
     # Footer
     if [ "$SEARCH_MODE" -eq 1 ]; then
         printf '\n  /%s_\n' "$SEARCH_QUERY"
     else
-        local max_key status2_indicator
-        max_key="$(pos_to_key "$DISPLAY_COUNT")"
+        local status2_indicator
         if [ -f "${DATA_DIR}/status2.disabled" ]; then
             status2_indicator="[n] status2:off"
         else
             status2_indicator="[n] status2:on"
         fi
-        printf '\n  [jk] nav  [Enter] select  [/] search  [r] refresh  [c] clear  %s  [q] quit\n' "$status2_indicator"
+        printf '\n  [jk/↑↓] nav  [Enter] select  [/] search  [r] refresh  [c] clear  %s  [q] quit\n' "$status2_indicator"
     fi
 }
 
@@ -394,6 +417,22 @@ clamp_cursor() {
     [ "$CURSOR" -lt 1 ] && CURSOR=1
 }
 
+# Adjust SCROLL_OFFSET so CURSOR is within the visible viewport
+ensure_cursor_visible() {
+    local rows
+    rows=$(tput lines 2>/dev/null || echo 24)
+    # Overhead: 1 header + up to 4 section labels + 2 footer lines
+    local visible=$(( rows - 7 ))
+    [ "$visible" -lt 3 ] && visible=3
+
+    if [ "$CURSOR" -lt "$SCROLL_OFFSET" ]; then
+        SCROLL_OFFSET=$CURSOR
+    elif [ "$CURSOR" -ge $(( SCROLL_OFFSET + visible )) ]; then
+        SCROLL_OFFSET=$(( CURSOR - visible + 1 ))
+    fi
+    [ "$SCROLL_OFFSET" -lt 1 ] && SCROLL_OFFSET=1
+}
+
 # Auto-scan for untracked Claude Code sessions
 "${SCRIPT_DIR}/scan.sh" >/dev/null 2>&1 || true
 
@@ -413,6 +452,7 @@ move_cursor() {
     CURSOR=$(( CURSOR + delta ))
     [ "$CURSOR" -lt 1 ] && CURSOR=$DISPLAY_COUNT      # wrap to bottom
     [ "$CURSOR" -gt "$DISPLAY_COUNT" ] && CURSOR=1    # wrap to top
+    ensure_cursor_visible
     render
 }
 
@@ -444,6 +484,7 @@ while true; do
                     SEARCH_QUERY="${SEARCH_QUERY%?}"
                 fi
                 build_display_order
+                SCROLL_OFFSET=1
                 clamp_cursor
                 render
                 ;;
@@ -454,6 +495,7 @@ while true; do
                     SEARCH_QUERY="${SEARCH_QUERY}${key}"
                     build_display_order
                     CURSOR=1
+                    SCROLL_OFFSET=1
                     clamp_cursor
                     render
                 fi
