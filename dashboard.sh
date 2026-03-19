@@ -269,7 +269,8 @@ render_entry() {
     [ "$show_wname" -eq 1 ] && printf '  %-*s' "$wname_w" "$wname"
     [ "$show_msg" -eq 1 ] && printf '  %-*s' "$msg_w" "$msg"
     printf '  %5s' "$rel"
-    [ "$is_selected" -eq 1 ] && printf '\033[K\033[0m'  # extend highlight to EOL
+    printf '\033[K'  # fill remainder of line with current background
+    [ "$is_selected" -eq 1 ] && printf '\033[0m'
     printf '\n'
 }
 
@@ -328,7 +329,7 @@ render() {
         return
     fi
 
-    # Compact single-line header
+    # Header (line 1)
     printf '  \033[1mClaude Code Sessions\033[0m\n'
 
     if [ "$DISPLAY_COUNT" -eq 0 ]; then
@@ -337,15 +338,17 @@ render() {
         else
             printf '\n    No active sessions.\n'
         fi
+        # Footer pinned to bottom
+        printf '\033[%d;1H' "$rows"
         if [ "$SEARCH_MODE" -eq 1 ]; then
-            printf '\n  /%s_\n' "$SEARCH_QUERY"
+            printf '  /%s_' "$SEARCH_QUERY"
         else
-            printf '\n  [r] refresh  [/] search  [q] quit\n'
+            printf '  [r] refresh  [/] search  [q] quit'
         fi
         return
     fi
 
-    # Visible entry budget: rows minus header(1), footer(2), margin(1)
+    # Visible entry budget: rows minus header(1), scroll indicators(2), footer(1)
     local available=$(( rows - 4 ))
     [ "$available" -lt 3 ] && available=3
 
@@ -370,26 +373,34 @@ render() {
         lines_used=$(( lines_used + 1 ))
     done
 
-    # Scroll indicators
-    if [ "$SCROLL_OFFSET" -gt 1 ]; then
-        printf '  \033[90m▲ %d more above\033[0m\n' "$(( SCROLL_OFFSET - 1 ))"
-    fi
+    # Scroll indicators just above footer
     local last_visible=$(( SCROLL_OFFSET + lines_used - 1 ))
-    if [ "$last_visible" -lt "$DISPLAY_COUNT" ]; then
-        printf '  \033[90m▼ %d more below\033[0m\n' "$(( DISPLAY_COUNT - last_visible ))"
+    local indicator_row=$(( rows - 1 ))
+    if [ "$SCROLL_OFFSET" -gt 1 ] && [ "$last_visible" -lt "$DISPLAY_COUNT" ]; then
+        printf '\033[%d;1H' "$indicator_row"
+        printf '  \033[90m▲ %d above  ▼ %d below\033[0m' \
+            "$(( SCROLL_OFFSET - 1 ))" "$(( DISPLAY_COUNT - last_visible ))"
+    elif [ "$SCROLL_OFFSET" -gt 1 ]; then
+        printf '\033[%d;1H' "$indicator_row"
+        printf '  \033[90m▲ %d more above\033[0m' "$(( SCROLL_OFFSET - 1 ))"
+    elif [ "$last_visible" -lt "$DISPLAY_COUNT" ]; then
+        printf '\033[%d;1H' "$indicator_row"
+        printf '  \033[90m▼ %d more below\033[0m' "$(( DISPLAY_COUNT - last_visible ))"
     fi
 
-    # Footer
-    if [ "$SEARCH_MODE" -eq 1 ]; then
-        printf '\n  /%s_\n' "$SEARCH_QUERY"
+    # Footer pinned to bottom row
+    local status2_indicator
+    if [ -f "${DATA_DIR}/status2.disabled" ]; then
+        status2_indicator="[n] status2:off"
     else
-        local status2_indicator
-        if [ -f "${DATA_DIR}/status2.disabled" ]; then
-            status2_indicator="[n] status2:off"
-        else
-            status2_indicator="[n] status2:on"
-        fi
-        printf '\n  [jk/↑↓] nav  [Enter] select  [/] search  [r] refresh  [c] clear  %s  [q] quit\n' "$status2_indicator"
+        status2_indicator="[n] status2:on"
+    fi
+    printf '\033[%d;1H' "$rows"
+    if [ "$SEARCH_MODE" -eq 1 ]; then
+        printf '  /%s_' "$SEARCH_QUERY"
+    else
+        printf '  [jk/↑↓] nav  [Enter] select  [/] search  [r] refresh  [c] clear  %s  [q] quit' \
+            "$status2_indicator"
     fi
 }
 
