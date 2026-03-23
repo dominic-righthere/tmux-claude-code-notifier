@@ -15,11 +15,15 @@ chmod 700 "$DATA_DIR"
 # Read JSON from stdin
 INPUT="$(cat)"
 
-# Parse JSON fields with jq
+# Parse all hook JSON fields with jq
 EVENT="$(printf '%s' "$INPUT" | jq -r '.hook_event_name // empty')"
 MSG="$(printf '%s' "$INPUT" | jq -r '.message // empty')"
 TOOL_NAME="$(printf '%s' "$INPUT" | jq -r '.tool_name // empty')"
-TOOL_INPUT="$(printf '%s' "$INPUT" | jq -r '.tool_input // empty')"
+TOOL_INPUT="$(printf '%s' "$INPUT" | jq -r '(.tool_input | if type == "object" then tostring else . // "" end)')"
+SESSION_ID="$(printf '%s' "$INPUT" | jq -r '.session_id // empty')"
+CWD="$(printf '%s' "$INPUT" | jq -r '.cwd // empty')"
+PERMISSION_MODE="$(printf '%s' "$INPUT" | jq -r '.permission_mode // empty')"
+PROMPT="$(printf '%s' "$INPUT" | jq -r '.prompt // empty')"
 
 # Exit if we couldn't parse the event
 [ -z "$EVENT" ] && exit 0
@@ -53,34 +57,29 @@ case "$EVENT" in
     SessionStart)
         # New Claude Code session — register immediately
         write_file "$ACTIVE_DIR" "working" "Starting..."
-        log_event src hook event SessionStart session "$SESSION" window "$WINDOW"
+        log_event src hook event SessionStart session "$SESSION" window "$WINDOW" extra "sid=$SESSION_ID mode=$PERMISSION_MODE cwd=$CWD"
         ;;
     SessionEnd)
         # Session closed — clean up all state
         rm -f "${ACTIVE_DIR}/${KEY}" "${NOTIF_DIR}/${KEY}" "${MSG_ID_DIR}/${KEY}"
-        log_event src hook event SessionEnd session "$SESSION" window "$WINDOW"
+        log_event src hook event SessionEnd session "$SESSION" window "$WINDOW" extra "sid=$SESSION_ID"
         ;;
     UserPromptSubmit)
         # Claude is working — mark active, clear notification + msg_id
         write_file "$ACTIVE_DIR" "working" "Working..."
         rm -f "${NOTIF_DIR}/${KEY}" "${MSG_ID_DIR}/${KEY}"
-        # Extract user prompt text and log it (truncate at 500 chars for DB sanity)
-        USER_PROMPT="$(printf '%s' "$INPUT" | jq -r '.prompt // empty')"
-        if [ "${#USER_PROMPT}" -gt 500 ]; then
-            USER_PROMPT="${USER_PROMPT:0:500}"
-        fi
         # Dispatch prompt to Telegram so user sees what they asked
-        if [ -n "$USER_PROMPT" ]; then
-            "${SCRIPT_DIR}/dispatch.sh" "prompt" "$SESSION" "$WINDOW" "$USER_PROMPT" &
+        if [ -n "$PROMPT" ]; then
+            "${SCRIPT_DIR}/dispatch.sh" "prompt" "$SESSION" "$WINDOW" "$PROMPT" &
         fi
-        log_event src hook event UserPromptSubmit session "$SESSION" window "$WINDOW" text "$USER_PROMPT"
+        log_event src hook event UserPromptSubmit session "$SESSION" window "$WINDOW" text "$PROMPT" extra "sid=$SESSION_ID cwd=$CWD"
         ;;
     PreToolUse)
         # Live tool activity — show what Claude is doing instead of "Working..."
         tool_label="${TOOL_NAME:-tool}"
         write_file "$ACTIVE_DIR" "working" "${tool_label}..."
         rm -f "${NOTIF_DIR}/${KEY}"    # clear stale waiting (permission was resolved)
-        log_event src hook event PreToolUse session "$SESSION" window "$WINDOW" tool "$TOOL_NAME"
+        log_event src hook event PreToolUse session "$SESSION" window "$WINDOW" tool "$TOOL_NAME" text "$TOOL_INPUT" extra "sid=$SESSION_ID cwd=$CWD"
         ;;
     Stop)
         # Claude finished — mark as idle (keep in active dir for visibility)
@@ -88,7 +87,7 @@ case "$EVENT" in
         write_file "$NOTIF_DIR" "finished" "Finished"
         printf '\a'
         "${SCRIPT_DIR}/dispatch.sh" "finished" "$SESSION" "$WINDOW" "Finished" &
-        log_event src hook event Stop session "$SESSION" window "$WINDOW" type finished
+        log_event src hook event Stop session "$SESSION" window "$WINDOW" type finished message "$MSG" extra "sid=$SESSION_ID cwd=$CWD"
         ;;
     Notification)
         [ -z "$MSG" ] && MSG="Notification"
@@ -116,8 +115,8 @@ case "$EVENT" in
         fi
         write_file "$NOTIF_DIR" "waiting" "$local_msg"
         printf '\a'
-        "${SCRIPT_DIR}/dispatch.sh" "waiting" "$SESSION" "$WINDOW" "$local_msg" "$TOOL_NAME" &
-        log_event src hook event PermissionRequest session "$SESSION" window "$WINDOW" tool "$TOOL_NAME"
+        "${SCRIPT_DIR}/dispatch.sh" "waiting" "$SESSION" "$WINDOW" "$local_msg" "$TOOL_NAME" "$PERMISSION_MODE" &
+        log_event src hook event PermissionRequest session "$SESSION" window "$WINDOW" tool "$TOOL_NAME" text "$TOOL_INPUT" extra "sid=$SESSION_ID cwd=$CWD mode=$PERMISSION_MODE"
         ;;
 esac
 

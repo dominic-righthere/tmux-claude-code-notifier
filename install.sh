@@ -69,14 +69,26 @@ if [ ! -f "$SETTINGS_FILE" ]; then
 fi
 
 jq --arg cmd "${SCRIPT_DIR}/notify.sh" '
+  # Add $cmd in its OWN separate hook group for each event.
+  # Keeping it separate from other tools (e.g. agenthive) means their upsert logic
+  # only removes their own group and leaves ours untouched.
+  # No-ops if $cmd is already present in any group for that event.
+  def add_notifier(ev):
+    .hooks[ev] as $existing |
+    if ([($existing // [])[] | .hooks[]? | .command] | index($cmd)) != null then
+      .  # already present, nothing to do
+    else
+      .hooks[ev] = (($existing // []) + [{"matcher": "", "hooks": [{"type": "command", "command": $cmd}]}])
+    end;
+
   .hooks = (.hooks // {}) |
-  .hooks.SessionStart = [{"matcher": "", "hooks": [{"type": "command", "command": $cmd}]}] |
-  .hooks.SessionEnd = [{"matcher": "", "hooks": [{"type": "command", "command": $cmd}]}] |
-  .hooks.UserPromptSubmit = [{"matcher": "", "hooks": [{"type": "command", "command": $cmd}]}] |
-  .hooks.PreToolUse = [{"matcher": "", "hooks": [{"type": "command", "command": $cmd}]}] |
-  .hooks.Stop = [{"matcher": "", "hooks": [{"type": "command", "command": $cmd}]}] |
-  .hooks.Notification = [{"matcher": "", "hooks": [{"type": "command", "command": $cmd}]}] |
-  .hooks.PermissionRequest = [{"matcher": "", "hooks": [{"type": "command", "command": $cmd}]}]
+  add_notifier("SessionStart") |
+  add_notifier("SessionEnd") |
+  add_notifier("UserPromptSubmit") |
+  add_notifier("PreToolUse") |
+  add_notifier("Stop") |
+  add_notifier("Notification") |
+  add_notifier("PermissionRequest")
 ' "$SETTINGS_FILE" > "${SETTINGS_FILE}.tmp" && mv "${SETTINGS_FILE}.tmp" "$SETTINGS_FILE"
 
 printf '  Hooks configured for: SessionStart, SessionEnd, UserPromptSubmit, PreToolUse, Stop, Notification, PermissionRequest\n'

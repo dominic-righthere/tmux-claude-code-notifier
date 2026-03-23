@@ -70,6 +70,21 @@ class TestStripGhostText:
         text = "real \x1b[90mghost\x1b[39m real"
         assert strip_ghost_text(text) == "real  real"
 
+    def test_preserves_24bit_color(self):
+        """24-bit color (38;2;R;G;B) must NOT be stripped as dim."""
+        text = "\x1b[38;2;0;200;200m❯ 1. Yes\x1b[39m"
+        assert strip_ghost_text(text) == text
+
+    def test_preserves_24bit_white(self):
+        """24-bit white text must survive ghost stripping."""
+        text = "\x1b[38;2;255;255;255mHello\x1b[39m"
+        assert strip_ghost_text(text) == text
+
+    def test_preserves_24bit_bg(self):
+        """24-bit background color (48;2;...) must survive."""
+        text = "\x1b[48;2;30;30;30mtext\x1b[0m"
+        assert strip_ghost_text(text) == text
+
 
 class TestTrimBlankLines:
     def test_trims_leading(self):

@@ -1423,7 +1423,7 @@ fi
 
 # Test 120: notify.sh extracts prompt from UserPromptSubmit
 run_test
-if sed -n '/UserPromptSubmit)/,/;;/p' ./notify.sh | grep -q '\.prompt'; then
+if sed -n '/UserPromptSubmit)/,/;;/p' ./notify.sh | grep -q 'PROMPT'; then
     pass "notify.sh extracts prompt from UserPromptSubmit"
 else
     fail "notify.sh extracts prompt from UserPromptSubmit"

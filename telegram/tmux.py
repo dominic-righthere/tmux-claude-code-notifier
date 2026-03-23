@@ -58,6 +58,31 @@ def _run_tmux_stdin(data: str, *args: str, timeout: float = 5.0) -> bool:
         return False
 
 
+def poll_for_render(
+    session: str, window: str,
+    timeout: float = 2.0, interval: float = 0.1, initial_delay: float = 0.1,
+) -> None:
+    """Poll bottom of pane until content stabilizes (render complete).
+
+    Captures bottom 20 lines at native width (no resize, fast).
+    Returns once two consecutive captures match, or on timeout.
+    """
+    time.sleep(initial_delay)
+    deadline = time.monotonic() + timeout
+    prev: str | None = None
+    stable = 0
+    while time.monotonic() < deadline:
+        bottom = run_tmux("capture-pane", "-t", f"{session}:{window}", "-J", "-p", "-S", "-20")
+        if bottom is not None and bottom == prev:
+            stable += 1
+            if stable >= 2:
+                return
+        else:
+            stable = 0
+            prev = bottom
+        time.sleep(interval)
+
+
 def capture_pane(session: str, window: str, lines: int = 200) -> str | None:
     """Capture pane content, returns raw text or None."""
     return run_tmux("capture-pane", "-t", f"{session}:{window}", "-J", "-p", "-S", f"-{lines}")
@@ -68,17 +93,11 @@ def capture_pane_escaped(session: str, window: str, lines: int = 200) -> str | N
     return run_tmux("capture-pane", "-e", "-t", f"{session}:{window}", "-J", "-p", "-S", f"-{lines}")
 
 
-def capture_wide(session: str, window: str, lines: int = 200, width: int = 250) -> tuple[str | None, int]:
-    """Resize pane wide, capture with ANSI, restore. Returns (text, capture_width)."""
-    target = f"{session}:{window}"
-    orig = pane_width(session, window)
-    resized = run_tmux("resize-pane", "-t", target, "-x", str(width)) is not None
-    if resized:
-        time.sleep(0.15)
+def capture_wide(session: str, window: str, lines: int = 200) -> tuple[str | None, int]:
+    """Capture pane with ANSI codes at native width. Returns (text, pane_width)."""
+    pw = pane_width(session, window)
     captured = capture_pane_escaped(session, window, lines)
-    if resized:
-        run_tmux("resize-pane", "-t", target, "-x", str(orig))
-    return captured, width if resized else orig
+    return captured, pw
 
 
 def pane_width(session: str, window: str) -> int:

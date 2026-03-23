@@ -79,7 +79,8 @@ def load_config() -> Optional[TelegramConfig]:
 def save_config(config: TelegramConfig) -> None:
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f"BOT_TOKEN={config.bot_token}\nCHAT_ID={config.chat_id}\n")
+    lines = f"BOT_TOKEN={config.bot_token}\nCHAT_ID={config.chat_id}\n"
+    path.write_text(lines)
     path.chmod(0o600)
 
 
@@ -156,6 +157,20 @@ def clear_session_state(session: str, window: str) -> None:
     key = make_msg_key(session, window)
     (notif_dir() / key).unlink(missing_ok=True)
     (msg_id_dir() / key).unlink(missing_ok=True)
+
+
+def is_muted() -> bool:
+    """Check if notifications are muted (telegram.disabled flag file exists)."""
+    return (data_dir() / "telegram.disabled").exists()
+
+
+def set_muted(muted: bool) -> None:
+    """Touch or remove the telegram.disabled flag file."""
+    flag = data_dir() / "telegram.disabled"
+    if muted:
+        flag.touch()
+    else:
+        flag.unlink(missing_ok=True)
 
 
 def find_session_by_msg_id(target_msg_id: str) -> tuple[str, str] | None:

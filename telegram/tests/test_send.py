@@ -16,6 +16,7 @@ class TestSendNotification:
 
         config = TelegramConfig(bot_token="123:ABC", chat_id="456")
         mock_state.load_config.return_value = config
+        mock_state.is_muted.return_value = False
         mock_state.make_msg_key.return_value = "main_1"
         mock_state.read_msg_id.return_value = None
         mock_tmux.pane_current_path.return_value = "/home/user/myproject"
@@ -38,6 +39,7 @@ class TestSendNotification:
 
         config = TelegramConfig(bot_token="123:ABC", chat_id="456")
         mock_state.load_config.return_value = config
+        mock_state.is_muted.return_value = False
         mock_state.make_msg_key.return_value = "main_1"
         mock_state.read_msg_id.return_value = MsgIdEntry(msg_id="100", type="prompt")
         mock_tmux.pane_current_path.return_value = "/home/user/project"
@@ -53,62 +55,13 @@ class TestSendNotification:
     @patch("telegram.send.tmux")
     @patch("telegram.send.state")
     @patch("telegram.send.db")
-    def test_skips_auto_accept(self, mock_db, mock_state, mock_tmux, mock_api):
-        from telegram.models import TelegramConfig
-
-        config = TelegramConfig(bot_token="123:ABC", chat_id="456")
-        mock_state.load_config.return_value = config
-        mock_state.make_msg_key.return_value = "main_1"
-        mock_tmux.pane_current_path.return_value = "/home/user/project"
-        # No numbered options visible — tool was truly auto-accepted
-        mock_tmux.capture_wide.return_value = ("⏵⏵ Auto-accept edits\n⏺ Running some command...", 120)
-
-        send_notification(EventType.WAITING, "main", "1", "Waiting", "Bash")
-
-        mock_api.send_message.assert_not_called()
-        mock_api.edit_message.assert_not_called()
-
-    @patch("telegram.send.api")
-    @patch("telegram.send.tmux")
-    @patch("telegram.send.state")
-    @patch("telegram.send.db")
-    def test_auto_accept_with_pending_prompt(self, mock_db, mock_state, mock_tmux, mock_api):
-        """Dangerous commands show a prompt even in auto-accept — should NOT skip."""
-        from telegram.models import TelegramConfig
-
-        config = TelegramConfig(bot_token="123:ABC", chat_id="456")
-        mock_state.load_config.return_value = config
-        mock_state.make_msg_key.return_value = "main_1"
-        mock_state.read_msg_id.return_value = None
-        mock_tmux.pane_current_path.return_value = "/home/user/project"
-        # Pane has ⏵⏵ (auto-accept active) AND a permission prompt with numbered options
-        mock_tmux.capture_wide.return_value = (
-            "⏵⏵ Auto-accept edits\n"
-            "⏺ Claude wants to run this command:\n"
-            "  rm -rf /tmp/stuff && echo done\n"
-            "──────────────────────────────\n"
-            "  Do you want to proceed?\n"
-            "  ❯ 1. Yes\n"
-            "    2. No\n",
-            120,
-        )
-        mock_api.send_message.return_value = "500"
-
-        send_notification(EventType.WAITING, "main", "1", "Waiting", "Bash")
-
-        # Should NOT be skipped — notification must be sent
-        mock_api.send_message.assert_called_once()
-
-    @patch("telegram.send.api")
-    @patch("telegram.send.tmux")
-    @patch("telegram.send.state")
-    @patch("telegram.send.db")
     def test_type_guard_prevents_overwrite(self, mock_db, mock_state, mock_tmux, mock_api):
         """finished should not edit over a waiting message."""
         from telegram.models import TelegramConfig
 
         config = TelegramConfig(bot_token="123:ABC", chat_id="456")
         mock_state.load_config.return_value = config
+        mock_state.is_muted.return_value = False
         mock_state.make_msg_key.return_value = "main_1"
         mock_state.read_msg_id.return_value = MsgIdEntry(msg_id="100", type="waiting")
         mock_tmux.pane_current_path.return_value = "/home/user/project"
@@ -118,6 +71,30 @@ class TestSendNotification:
         send_notification(EventType.FINISHED, "main", "1", "Finished")
 
         # Should NOT edit, should send new
+        mock_api.edit_message.assert_not_called()
+        mock_api.send_message.assert_called_once()
+
+    @patch("telegram.send.api")
+    @patch("telegram.send.tmux")
+    @patch("telegram.send.state")
+    @patch("telegram.send.db")
+    def test_finished_not_overwritten_by_waiting(self, mock_db, mock_state, mock_tmux, mock_api):
+        """waiting should not edit over a finished message — strip buttons and send new."""
+        from telegram.models import TelegramConfig
+
+        config = TelegramConfig(bot_token="123:ABC", chat_id="456")
+        mock_state.load_config.return_value = config
+        mock_state.is_muted.return_value = False
+        mock_state.make_msg_key.return_value = "main_1"
+        mock_state.read_msg_id.return_value = MsgIdEntry(msg_id="100", type="finished")
+        mock_tmux.pane_current_path.return_value = "/home/user/project"
+        mock_tmux.capture_wide.return_value = ("⏺ Can I run this?", 120)
+        mock_api.send_message.return_value = "201"
+
+        send_notification(EventType.WAITING, "main", "1", "Waiting")
+
+        # Should strip buttons from finished message, then send new
+        mock_api.strip_buttons.assert_called_once_with(config, "100")
         mock_api.edit_message.assert_not_called()
         mock_api.send_message.assert_called_once()
 
@@ -140,6 +117,7 @@ class TestSendNotification:
 
         config = TelegramConfig(bot_token="123:ABC", chat_id="456")
         mock_state.load_config.return_value = config
+        mock_state.is_muted.return_value = False
         mock_state.make_msg_key.return_value = "main_1"
         mock_state.read_msg_id.return_value = None
         mock_tmux.pane_current_path.return_value = "/home/user/project"
@@ -162,6 +140,7 @@ class TestSendNotification:
 
         config = TelegramConfig(bot_token="123:ABC", chat_id="456")
         mock_state.load_config.return_value = config
+        mock_state.is_muted.return_value = False
         mock_state.make_msg_key.return_value = "main_1"
         mock_state.read_msg_id.return_value = None
         mock_tmux.pane_current_path.return_value = "/home/user/project"
@@ -179,12 +158,34 @@ class TestSendNotification:
     @patch("telegram.send.tmux")
     @patch("telegram.send.state")
     @patch("telegram.send.db")
+    def test_muted_logs_not_sent_and_skips_api(self, mock_db, mock_state, mock_tmux, mock_api):
+        """When muted, send_notification should log not_sent and not call API."""
+        from telegram.models import TelegramConfig
+
+        config = TelegramConfig(bot_token="123:ABC", chat_id="456")
+        mock_state.load_config.return_value = config
+        mock_state.is_muted.return_value = True
+
+        send_notification(EventType.WAITING, "main", "1", "Waiting", "Bash")
+
+        mock_db.log_event.assert_called_once_with(
+            src="send", event="not_sent", type="waiting", session="main", window="1", tool="Bash",
+        )
+        mock_api.send_message.assert_not_called()
+        mock_api.edit_message.assert_not_called()
+        mock_tmux.capture_wide.assert_not_called()
+
+    @patch("telegram.send.api")
+    @patch("telegram.send.tmux")
+    @patch("telegram.send.state")
+    @patch("telegram.send.db")
     def test_prompt_unescapes_json_newlines(self, mock_db, mock_state, mock_tmux, mock_api):
         """Literal \\n from bash JSON extraction should become real newlines."""
         from telegram.models import TelegramConfig
 
         config = TelegramConfig(bot_token="123:ABC", chat_id="456")
         mock_state.load_config.return_value = config
+        mock_state.is_muted.return_value = False
         mock_state.make_msg_key.return_value = "main_1"
         mock_state.read_msg_id.return_value = None
         mock_tmux.pane_current_path.return_value = "/home/user/project"

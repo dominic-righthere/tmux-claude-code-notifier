@@ -173,12 +173,12 @@ fi
 [ "$QUIET" -eq 0 ] && printf "${YELLOW}Scripts${NC}\n"
 
 non_exec=""
-for f in "${SCRIPT_DIR}"/*.sh; do
-    [ -f "$f" ] || continue
-    if [ ! -x "$f" ]; then
-        non_exec="${non_exec} $(basename "$f")"
+while IFS= read -r f; do
+    [ -f "${SCRIPT_DIR}/${f}" ] || continue
+    if [ ! -x "${SCRIPT_DIR}/${f}" ]; then
+        non_exec="${non_exec} ${f}"
     fi
-done
+done < <(git -C "${SCRIPT_DIR}" ls-files '*.sh' 2>/dev/null)
 
 if [ -z "$non_exec" ]; then
     result_pass "All .sh files are executable"

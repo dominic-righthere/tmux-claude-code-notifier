@@ -12,13 +12,32 @@ def strip_ghost_text(text: str) -> str:
     """Strip dim/grey ghost text spans (autocomplete suggestions).
 
     Must be called BEFORE strip_ansi(). Removes spans using:
-    - SGR 2 (dim)
+    - SGR 2 (dim) — but NOT 38;2;... or 48;2;... (24-bit color)
     - SGR 90 (bright-black)
     - 256-color grey (38;5;240-249)
+
+    Uses two passes: one for grey/bright-black, one for dim.
+    Dim matching uses a callback to verify SGR 2 is actually dim,
+    not part of a 24-bit color sequence (38;2;... or 48;2;...).
     """
-    _GHOST_OPEN = r"\x1b\[(?:[0-9;]*;)?(?:2|90|38;5;24[0-9])(?:;[0-9;]*)?m"
+    _GREY_OPEN = r"\x1b\[(?:[0-9;]*;)?(?:90|38;5;24[0-9])(?:;[0-9;]*)?m"
     _RESET = r"\x1b\[(?:0?m|22m|39m)"
-    return re.sub(_GHOST_OPEN + r"[^\x1b]*" + _RESET, "", text)
+    _SPAN = r"[^\x1b]*"
+    text = re.sub(_GREY_OPEN + _SPAN + _RESET, "", text)
+
+    # Dim: match any SGR containing param 2, then verify it's not 24-bit color
+    _DIM_SEQ = re.compile(r"\x1b\[([0-9;]*)m([^\x1b]*)" + _RESET)
+
+    def _strip_dim(m: re.Match) -> str:  # type: ignore[type-arg]
+        params = m.group(1).split(";")
+        # Check if 2 is a standalone SGR param (dim), not part of 38;2 or 48;2
+        for i, p in enumerate(params):
+            if p == "2" and (i == 0 or params[i - 1] not in ("38", "48")):
+                return ""
+        return m.group(0)  # not dim, keep it
+
+    text = _DIM_SEQ.sub(_strip_dim, text)
+    return text
 
 
 def strip_ansi(text: str) -> str:
