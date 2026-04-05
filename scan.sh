@@ -13,9 +13,12 @@ mkdir -p "$ACTIVE_DIR" "$NOTIF_DIR"
 NOW="$(date +%s)"
 REGISTERED=0
 
-while IFS='|' read -r sess win wname cmd; do
-    # Match version pattern X.Y.Z (Claude Code shows its version as the command)
-    [[ "$cmd" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+while IFS='|' read -r sess win wname title; do
+    # Claude Code sets the pane title with a spinner prefix (✳ ⠂ ⠐ ⠄ etc.)
+    # followed by a task name or "Claude Code". Match either form.
+    # Fallback: also match old-style version number (X.Y.Z) as pane command.
+    [[ "$title" =~ ^[✳⠂⠐⠄⠆⠇⠋⠙⠸⠴⠦⠧⠏⠛]\ .+ ]] || \
+    [[ "$title" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
 
     # Build file key (same format as notify.sh)
     safe_sess="$(sanitize_key "$sess")"
@@ -28,6 +31,6 @@ while IFS='|' read -r sess win wname cmd; do
     # Register as idle
     write_state_file "$ACTIVE_DIR" "$key" "$sess" "$win" "$wname" "idle" "Idle" "$NOW"
     REGISTERED=$(( REGISTERED + 1 ))
-done < <(tmux list-panes -a -F "#{session_name}|#{window_index}|#{window_name}|#{pane_current_command}" 2>/dev/null)
+done < <(tmux list-panes -a -F "#{session_name}|#{window_index}|#{window_name}|#{pane_title}" 2>/dev/null)
 
 printf '%d' "$REGISTERED"
