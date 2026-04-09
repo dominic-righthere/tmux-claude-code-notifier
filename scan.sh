@@ -14,6 +14,9 @@ NOW="$(date +%s)"
 REGISTERED=0
 
 while IFS='|' read -r sess win wname title; do
+    # Skip the cc-monitor session — its linked panes have CC titles but are not real sessions
+    [ "$sess" = "cc-monitor" ] && continue
+
     # Claude Code sets the pane title with a spinner prefix (✳ ⠂ ⠐ ⠄ etc.)
     # followed by a task name or "Claude Code". Match either form.
     # Fallback: also match old-style version number (X.Y.Z) as pane command.

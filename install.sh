@@ -59,6 +59,7 @@ chmod +x "${SCRIPT_DIR}/telegram-send-py.sh"
 chmod +x "${SCRIPT_DIR}/telegram-bot.sh"
 chmod +x "${SCRIPT_DIR}/restart.sh"
 chmod +x "${SCRIPT_DIR}/doctor.sh"
+chmod +x "${SCRIPT_DIR}/cc-monitor.sh"
 
 # 4. Merge hooks into ~/.claude/settings.json
 printf '  Configuring Claude Code hooks...\n'
@@ -117,6 +118,7 @@ set -g @rose_pine_status_right_append_section '#(${SCRIPT_DIR}/status.sh)'
 bind-key N run-shell '${SCRIPT_DIR}/popup.sh'
 bind-key J run-shell '${SCRIPT_DIR}/jump.sh'
 bind-key K run-shell '${SCRIPT_DIR}/cycle.sh'
+bind-key M run-shell '${SCRIPT_DIR}/cc-monitor.sh'
 ${MARKER_END}"
 
 # Insert before the TPM init line if it exists, otherwise append
