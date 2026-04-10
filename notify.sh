@@ -53,16 +53,25 @@ write_file() {
 }
 
 
+# Refresh cc-monitor session if it's currently open (background, no-op if closed)
+refresh_monitor() {
+    if tmux has-session -t cc-monitor 2>/dev/null; then
+        "${SCRIPT_DIR}/cc-monitor.sh" refresh &
+    fi
+}
+
 case "$EVENT" in
     SessionStart)
         # New Claude Code session — register immediately
         write_file "$ACTIVE_DIR" "working" "Starting..."
         log_event src hook event SessionStart session "$SESSION" window "$WINDOW" extra "sid=$SESSION_ID mode=$PERMISSION_MODE cwd=$CWD"
+        refresh_monitor
         ;;
     SessionEnd)
         # Session closed — clean up all state
         rm -f "${ACTIVE_DIR}/${KEY}" "${NOTIF_DIR}/${KEY}" "${MSG_ID_DIR}/${KEY}"
         log_event src hook event SessionEnd session "$SESSION" window "$WINDOW" extra "sid=$SESSION_ID"
+        refresh_monitor
         ;;
     UserPromptSubmit)
         # Claude is working — mark active, clear notification + msg_id
