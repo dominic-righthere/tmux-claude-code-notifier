@@ -53,8 +53,10 @@ write_file() {
 }
 
 
-# Refresh cc-monitor session if it's currently open (background, no-op if closed)
+# Refresh cc-monitor session if it's currently open and not disabled
+# Toggle: touch ~/.local/share/claude-notifier/cc-monitor.disabled to disable
 refresh_monitor() {
+    [ -f "${DATA_DIR}/cc-monitor.disabled" ] && return 0
     if tmux has-session -t cc-monitor 2>/dev/null; then
         "${SCRIPT_DIR}/cc-monitor.sh" refresh &
     fi
