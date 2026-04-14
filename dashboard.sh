@@ -408,7 +408,7 @@ render() {
     if [ "$SEARCH_MODE" -eq 1 ]; then
         printf '  /%s_' "$SEARCH_QUERY"
     else
-        printf '  [jk/↑↓] nav  [Enter] select  [/] search  [r] refresh  [c] clear  %s  [q] quit' \
+        printf '  [jk/↑↓] nav  [Enter] select  [/] search  [r] refresh  [c] clear  [M] monitor  %s  [q] quit' \
             "$status2_indicator"
     fi
 }
@@ -591,6 +591,10 @@ while true; do
             fi
             tmux refresh-client -S 2>/dev/null || true
             render
+            ;;
+        m|M)  # Open cc-monitor session
+            tmux run-shell "${SCRIPT_DIR}/cc-monitor.sh" 2>/dev/null || true
+            exit 0
             ;;
         i)  # Detail view
             if [ "$DISPLAY_COUNT" -gt 0 ]; then
