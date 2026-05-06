@@ -1,127 +1,120 @@
 #!/usr/bin/env bash
-# Claude Code Notifier — installer
-# Sets up data dirs, configures Claude Code hooks, and adds tmux config
+# Agent Notifier installer.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-DATA_DIR="${HOME}/.local/share/claude-notifier"
-SETTINGS_FILE="${HOME}/.claude/settings.json"
+source "${SCRIPT_DIR}/lib.sh"
+
+CLAUDE_SETTINGS="${HOME}/.claude/settings.json"
+CODEX_HOOKS="${HOME}/.codex/hooks.json"
+CODEX_CONFIG="${HOME}/.codex/config.toml"
+PI_EXTENSION_DIR="${HOME}/.pi/agent/extensions"
+PI_EXTENSION_FILE="${PI_EXTENSION_DIR}/agent-notifier.ts"
 TMUX_CONF="${HOME}/.tmux.conf"
 
-MARKER_BEGIN='# claude-notifier-begin'
-MARKER_END='# claude-notifier-end'
+MARKER_BEGIN='# agent-notifier-begin'
+MARKER_END='# agent-notifier-end'
+OLD_MARKER_BEGIN='# claude-notifier-begin'
+OLD_MARKER_END='# claude-notifier-end'
 
-printf 'Claude Code Notifier — Install\n\n'
+printf 'Agent Notifier - Install\n\n'
 
-# Check dependencies
-if ! command -v jq &>/dev/null; then
+if ! command -v jq >/dev/null 2>&1; then
     printf '  Error: jq is required but not installed.\n'
-    printf '  Install with:\n'
-    printf '    macOS:  brew install jq\n'
-    printf '    Ubuntu: sudo apt install jq\n'
     exit 1
 fi
 
-if ! command -v uv &>/dev/null; then
-    printf '  Error: uv is required but not installed.\n'
-    printf '  Install with: curl -LsSf https://astral.sh/uv/install.sh | sh\n'
-    exit 1
-fi
+migrate_legacy_state
+ensure_data_dirs
 
-# 1. Create data directories
-printf '  Creating data directories...\n'
-mkdir -p "${DATA_DIR}/active" "${DATA_DIR}/notifications" "${DATA_DIR}/telegram_msg_ids"
-
-# 2. Install default backends.conf (preserve existing)
 if [ ! -f "${DATA_DIR}/backends.conf" ]; then
     cp "${SCRIPT_DIR}/backends.conf" "${DATA_DIR}/backends.conf"
-    printf '  Installed default backends.conf\n'
-else
-    printf '  backends.conf already exists, skipping\n'
 fi
 
-# 3. Make scripts executable
 printf '  Making scripts executable...\n'
-chmod +x "${SCRIPT_DIR}/lib.sh"
-chmod +x "${SCRIPT_DIR}/notify.sh"
-chmod +x "${SCRIPT_DIR}/dispatch.sh"
-chmod +x "${SCRIPT_DIR}/dashboard.sh"
-chmod +x "${SCRIPT_DIR}/status.sh"
-chmod +x "${SCRIPT_DIR}/clear.sh"
-chmod +x "${SCRIPT_DIR}/jump.sh"
-chmod +x "${SCRIPT_DIR}/cycle.sh"
-chmod +x "${SCRIPT_DIR}/scan.sh"
-chmod +x "${SCRIPT_DIR}/popup.sh"
-chmod +x "${SCRIPT_DIR}/telegram-setup.sh"
-chmod +x "${SCRIPT_DIR}/telegram-send.sh"
-chmod +x "${SCRIPT_DIR}/telegram.sh"
-chmod +x "${SCRIPT_DIR}/telegram-send-py.sh"
-chmod +x "${SCRIPT_DIR}/telegram-bot.sh"
-chmod +x "${SCRIPT_DIR}/restart.sh"
-chmod +x "${SCRIPT_DIR}/doctor.sh"
-chmod +x "${SCRIPT_DIR}/cc-monitor.sh"
+chmod +x "${SCRIPT_DIR}/"*.sh
+chmod +x "${SCRIPT_DIR}/providers/"*.sh
 
-# 4. Merge hooks into ~/.claude/settings.json
-printf '  Configuring Claude Code hooks...\n'
+add_hook() {
+    local file="$1" event="$2" cmd="$3"
+    mkdir -p "$(dirname "$file")"
+    [ -f "$file" ] || printf '{}\n' > "$file"
+    jq --arg ev "$event" --arg cmd "$cmd" '
+      def add_notifier(ev):
+        .hooks[ev] as $existing |
+        if ([($existing // [])[] | .hooks[]? | .command] | index($cmd)) != null then .
+        else .hooks[ev] = (($existing // []) + [{"matcher": "", "hooks": [{"type": "command", "command": $cmd}]}])
+        end;
+      .hooks = (.hooks // {}) | add_notifier($ev)
+    ' "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
+}
 
-if [ ! -f "$SETTINGS_FILE" ]; then
-    mkdir -p "$(dirname "$SETTINGS_FILE")"
-    echo '{}' > "$SETTINGS_FILE"
+remove_hook() {
+    local file="$1" event="$2" cmd="$3"
+    [ -f "$file" ] || return 0
+    jq --arg ev "$event" --arg cmd "$cmd" '
+      if .hooks[$ev] == null then .
+      else
+        .hooks[$ev] = [
+          .hooks[$ev][]? |
+          .hooks = ([.hooks[]? | select(.command != $cmd)]) |
+          select((.hooks | length) > 0)
+        ] |
+        if (.hooks[$ev] | length) == 0 then del(.hooks[$ev]) else . end
+      end |
+      if .hooks == {} then del(.hooks) else . end
+    ' "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
+}
+
+printf '  Configuring Claude hooks...\n'
+CLAUDE_CMD="${SCRIPT_DIR}/providers/claude-hook.sh"
+for event in SessionStart SessionEnd UserPromptSubmit PreToolUse Stop Notification PermissionRequest; do
+    add_hook "$CLAUDE_SETTINGS" "$event" "$CLAUDE_CMD"
+done
+
+printf '  Configuring Codex hooks...\n'
+CODEX_CMD="${SCRIPT_DIR}/providers/codex-hook.sh"
+for event in SessionStart SessionEnd PreToolUse PostToolUse Notification PermissionRequest; do
+    remove_hook "$CODEX_HOOKS" "$event" "$CODEX_CMD"
+done
+for event in UserPromptSubmit Stop; do
+    add_hook "$CODEX_HOOKS" "$event" "$CODEX_CMD"
+done
+mkdir -p "$(dirname "$CODEX_CONFIG")"
+touch "$CODEX_CONFIG"
+if ! grep -q '^codex_hooks[[:space:]]*=' "$CODEX_CONFIG" 2>/dev/null; then
+    # Must be a top-level key, so prepend rather than append — appending after a
+    # [table] header would make TOML parse it as a member of that table.
+    { printf 'codex_hooks = true\n'; cat "$CODEX_CONFIG"; } > "${CODEX_CONFIG}.tmp" \
+        && mv "${CODEX_CONFIG}.tmp" "$CODEX_CONFIG"
 fi
 
-jq --arg cmd "${SCRIPT_DIR}/notify.sh" '
-  # Add $cmd in its OWN separate hook group for each event.
-  # Keeping it separate from other tools (e.g. agenthive) means their upsert logic
-  # only removes their own group and leaves ours untouched.
-  # No-ops if $cmd is already present in any group for that event.
-  def add_notifier(ev):
-    .hooks[ev] as $existing |
-    if ([($existing // [])[] | .hooks[]? | .command] | index($cmd)) != null then
-      .  # already present, nothing to do
-    else
-      .hooks[ev] = (($existing // []) + [{"matcher": "", "hooks": [{"type": "command", "command": $cmd}]}])
-    end;
+printf '  Installing Pi extension...\n'
+mkdir -p "$PI_EXTENSION_DIR"
+sed "s#__AGENT_NOTIFIER_SCRIPT_DIR__#${SCRIPT_DIR}#g" "${SCRIPT_DIR}/providers/pi-extension.ts" > "$PI_EXTENSION_FILE"
 
-  .hooks = (.hooks // {}) |
-  add_notifier("SessionStart") |
-  add_notifier("SessionEnd") |
-  add_notifier("UserPromptSubmit") |
-  add_notifier("PreToolUse") |
-  add_notifier("Stop") |
-  add_notifier("Notification") |
-  add_notifier("PermissionRequest")
-' "$SETTINGS_FILE" > "${SETTINGS_FILE}.tmp" && mv "${SETTINGS_FILE}.tmp" "$SETTINGS_FILE"
-
-printf '  Hooks configured for: SessionStart, SessionEnd, UserPromptSubmit, PreToolUse, Stop, Notification, PermissionRequest\n'
-
-# 5. Add tmux configuration
 printf '  Configuring tmux...\n'
-
-if [ ! -f "$TMUX_CONF" ]; then
-    touch "$TMUX_CONF"
+touch "$TMUX_CONF"
+if grep -q "$OLD_MARKER_BEGIN" "$TMUX_CONF" 2>/dev/null; then
+    sed "/${OLD_MARKER_BEGIN}/,/${OLD_MARKER_END}/d" "$TMUX_CONF" > "${TMUX_CONF}.tmp"
+    cat -s "${TMUX_CONF}.tmp" > "$TMUX_CONF"
+    rm -f "${TMUX_CONF}.tmp"
 fi
-
-# Remove existing claude-notifier block if present (between begin/end markers)
 if grep -q "$MARKER_BEGIN" "$TMUX_CONF" 2>/dev/null; then
-    printf '  Removing existing config block...\n'
-    # Pipe through sed (not -i) to support symlinked tmux.conf
-    sed '/# claude-notifier-begin/,/# claude-notifier-end/d' "$TMUX_CONF" > "${TMUX_CONF}.tmp"
-    # Collapse consecutive blank lines, write back through symlink
+    sed "/${MARKER_BEGIN}/,/${MARKER_END}/d" "$TMUX_CONF" > "${TMUX_CONF}.tmp"
     cat -s "${TMUX_CONF}.tmp" > "$TMUX_CONF"
     rm -f "${TMUX_CONF}.tmp"
 fi
 
-# Build the config block
 NOTIFIER_BLOCK="${MARKER_BEGIN}
 set-hook -g after-select-window 'run-shell \"${SCRIPT_DIR}/clear.sh #{session_name} #{window_index}\"'
 set -g @rose_pine_status_right_append_section '#(${SCRIPT_DIR}/status.sh)'
 bind-key N run-shell '${SCRIPT_DIR}/popup.sh'
 bind-key J run-shell '${SCRIPT_DIR}/jump.sh'
 bind-key K run-shell '${SCRIPT_DIR}/cycle.sh'
-bind-key M run-shell '${SCRIPT_DIR}/cc-monitor.sh'
+bind-key M run-shell '${SCRIPT_DIR}/agent-monitor.sh'
 ${MARKER_END}"
 
-# Insert before the TPM init line if it exists, otherwise append
 CONTENT="$(<"$TMUX_CONF")"
 TPM_LINE="run '~/.tmux/plugins/tpm/tpm'"
 if [[ "$CONTENT" == *"$TPM_LINE"* ]]; then
@@ -129,43 +122,14 @@ if [[ "$CONTENT" == *"$TPM_LINE"* ]]; then
     CONTENT="${CONTENT/"$TPM_LINE"/${NOTIFIER_BLOCK}${NL}${NL}${TPM_LINE}}"
     printf '%s\n' "$CONTENT" > "$TMUX_CONF"
 else
-    # Strip trailing newlines and append
-    while [[ "$CONTENT" == *$'\n' ]]; do
-        CONTENT="${CONTENT%$'\n'}"
-    done
+    while [[ "$CONTENT" == *$'\n' ]]; do CONTENT="${CONTENT%$'\n'}"; done
     printf '%s\n\n%s\n' "$CONTENT" "$NOTIFIER_BLOCK" > "$TMUX_CONF"
 fi
 
-# 6. Record installed version
-if [ -f "${SCRIPT_DIR}/VERSION" ]; then
-    cp "${SCRIPT_DIR}/VERSION" "${DATA_DIR}/installed_version"
-    printf '  Recorded version %s\n' "$(<"${SCRIPT_DIR}/VERSION")"
-fi
+[ -f "${SCRIPT_DIR}/VERSION" ] && cp "${SCRIPT_DIR}/VERSION" "${DATA_DIR}/installed_version"
 
-# 7. Install Python dependencies for Telegram backend
-printf '  Installing Python dependencies...\n'
-(cd "${SCRIPT_DIR}/telegram" && uv sync --quiet 2>&1) || {
-    printf '  Warning: uv sync failed. Telegram notifications may not work.\n'
-}
-
-# 8. Restart Telegram bot if it's currently running (picks up new code)
-if [ -f "${DATA_DIR}/telegram.pid" ]; then
-    old_pid="$(<"${DATA_DIR}/telegram.pid")"
-    if kill -0 "$old_pid" 2>/dev/null; then
-        printf '  Restarting Telegram bot...\n'
-        "${SCRIPT_DIR}/telegram-bot.sh" stop
-        "${SCRIPT_DIR}/telegram-bot.sh" start
-    else
-        rm -f "${DATA_DIR}/telegram.pid"
-    fi
-fi
-
-printf '\n  Installation complete!\n\n'
+printf '\n  Installation complete.\n\n'
 printf '  Next steps:\n'
 printf '    1. tmux source ~/.tmux.conf\n'
-printf '    2. Restart Claude Code (hooks load at startup)\n'
-printf '    3. prefix + N to open the notification dashboard\n'
-printf '    4. prefix + J to jump to the most recent notification\n'
-printf '    5. prefix + K to cycle through Claude Code sessions\n\n'
-printf '  Optional — Telegram notifications:\n'
-printf '    %s/telegram-setup.sh\n\n' "$SCRIPT_DIR"
+printf '    2. Restart Claude, Codex, and Pi sessions so hooks/extensions load\n'
+printf '    3. prefix + N dashboard, J jump, K cycle, M monitor\n\n'

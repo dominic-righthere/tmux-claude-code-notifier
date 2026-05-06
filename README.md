@@ -1,98 +1,66 @@
-# tmux-claude-code-notifier
+# tmux-agent-notifier
 
-Real-time tmux status bar notifications for Claude Code sessions.
+Local tmux status and navigation for coding agents.
 
-## Requirements
+This repo started as a Claude Code notifier. The active implementation now tracks Claude Code, OpenAI Codex, and Pi sessions through provider adapters that all write the same local state files under `~/.local/share/agent-notifier/`.
 
-- tmux
-- [jq](https://jqlang.github.io/jq/) — `brew install jq` / `apt install jq`
+Telegram support is archived under `archive/telegram/` and is not installed or used by default.
 
 ## Install
 
-```sh
-git clone https://github.com/dominic-righthere/tmux-claude-code-notifier.git
-cd tmux-claude-code-notifier
+```bash
 ./install.sh
 tmux source ~/.tmux.conf
 ```
 
-Restart any running Claude Code sessions so hooks take effect.
+Restart running Claude, Codex, and Pi sessions after install so their hooks or extensions load.
 
-## Keybindings
+To confirm the installation:
+
+```bash
+./doctor.sh
+```
+
+Expected healthy output is zero failures. A warning about `~/.local/share/claude-notifier` only means legacy Claude-only state still exists; install migrates useful state and leaves the old directory untouched.
+
+## Tmux Keys
 
 | Key | Action |
-|-----|--------|
-| `prefix + N` | Open notification dashboard |
-| `prefix + J` | Jump to most recent notification |
-| `prefix + K` | Cycle through Claude Code sessions |
+| --- | --- |
+| `prefix + N` | Open dashboard |
+| `prefix + J` | Jump to newest notification |
+| `prefix + K` | Cycle tracked agent windows |
+| `prefix + M` | Open monitor session with linked agent windows |
 
-## Status Icons
+## Providers
 
-| Icon | Meaning |
-|------|---------|
-| `⟳` | Working — Claude is processing |
-| `⏳` | Waiting — needs input (tool name shown) |
-| `●` | Finished — task complete |
-| `○` | Idle — session open, not active |
+Claude Code hooks are installed into `~/.claude/settings.json` and call `providers/claude-hook.sh`.
 
-## How It Works
+Codex hooks are installed into `~/.codex/hooks.json` and call `providers/codex-hook.sh`. The installer registers `UserPromptSubmit` and `Stop`, and adds `codex_hooks = true` to `~/.codex/config.toml` when it is missing.
 
-The installer registers Claude Code [hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) for all 7 lifecycle events (`SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `Stop`, `Notification`, `PermissionRequest`). Each hook invokes `notify.sh`, which writes state files to `~/.local/share/claude-notifier/`.
+Pi uses a TypeScript extension installed to `~/.pi/agent/extensions/agent-notifier.ts`.
 
-`status.sh` runs on a tmux polling interval, reads those files, and renders badge counts + a detail line in your status bar. The dashboard (`dashboard.sh`) provides a full overview and lets you jump directly to any session window.
+All providers call `notify.sh`, which writes `AGENT`, `SESSION`, `WINDOW`, `TYPE`, `MESSAGE`, and timing fields into:
 
-## Telegram Bot (Optional)
-
-Control Claude Code sessions from your phone — get notifications, view output, approve permissions.
-
-### Setup
-
-```sh
-./telegram-setup.sh
+```text
+~/.local/share/agent-notifier/active/
+~/.local/share/agent-notifier/notifications/
 ```
 
-The wizard walks you through creating a bot via BotFather and linking your Telegram account.
+If legacy state exists in `~/.local/share/claude-notifier`, install copies useful state into the new directory and leaves the old directory untouched.
 
-### Start the bot daemon
+## Diagnostics
 
-```sh
-./telegram.sh start    # background daemon
-./telegram.sh stop     # stop daemon
-./telegram.sh status   # check if running
-./telegram.sh run      # foreground (debug)
+```bash
+./doctor.sh
+./test.sh
 ```
-
-Notifications (permission requests, task finished) are sent automatically without the daemon. The daemon enables interactive commands.
-
-### Commands
-
-| Command | Action |
-|---------|--------|
-| `/s` | Interactive session list with inline buttons |
-| `/v <n>` | View last 200 lines of pane output |
-| `/a <n>` | Approve — send `y` + Enter to pane |
-| `/d <n>` | Deny — send `n` + Enter to pane |
-| `/send <n> <msg>` | Send arbitrary text to pane |
-| `/run <n> <cmd>` | Run command in adjacent tmux window |
-| `/restart [ver]` | Restart all Claude Code sessions (optional version) |
-| `/doctor` | Run diagnostics |
-| `/help` | Show available commands |
-
-Permission request notifications include inline **Approve** / **Deny** / **View** buttons. When Claude presents numbered options, those appear as individual buttons too (max 4).
 
 ## Uninstall
 
-```sh
+```bash
 ./uninstall.sh
 tmux source ~/.tmux.conf
 ```
 
-<details>
-<summary>Manual uninstall</summary>
-
-1. Remove the `# claude-notifier-begin` ... `# claude-notifier-end` block from `~/.tmux.conf`
-2. Remove the hook entries from `~/.claude/settings.json`
-3. `rm -rf ~/.local/share/claude-notifier`
-4. `tmux source ~/.tmux.conf`
-
-</details>
+Uninstall removes this repo's hook entries, the Pi extension it generated, the tmux block, and `~/.local/share/agent-notifier/`. It does not remove archived Telegram code or legacy `~/.local/share/claude-notifier/` state.

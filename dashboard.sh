@@ -1,15 +1,13 @@
 #!/usr/bin/env bash
-# Claude Code Notifier — popup dashboard
-# Shows working/waiting/finished Claude sessions, allows direct window switching
+# Agent Notifier popup dashboard.
+# Shows working/waiting/finished agent sessions and allows direct window switching.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/lib.sh"
-DATA_DIR="${HOME}/.local/share/claude-notifier"
 ACTIVE_DIR="${DATA_DIR}/active"
 NOTIF_DIR="${DATA_DIR}/notifications"
-mkdir -p "$ACTIVE_DIR" "$NOTIF_DIR"
-chmod 700 "$DATA_DIR"
+ensure_data_dirs
 
 NOW="$(date +%s)"
 
@@ -30,9 +28,10 @@ relative_time() {
 parse_file() {
     local file="$1"
     # Variables set globally (no local declaration) so caller can read them
-    P_SESSION="" P_WINDOW="" P_WINDOW_NAME="" P_MESSAGE="" P_TYPE="" P_TIMESTAMP=""
+    P_AGENT="" P_SESSION="" P_WINDOW="" P_WINDOW_NAME="" P_MESSAGE="" P_TYPE="" P_TIMESTAMP=""
     while IFS= read -r line; do
         case "${line%%=*}" in
+            AGENT) P_AGENT="${line#*=}" ;;
             SESSION) P_SESSION="${line#*=}" ;;
             WINDOW) P_WINDOW="${line#*=}" ;;
             WINDOW_NAME) P_WINDOW_NAME="${line#*=}" ;;
@@ -41,12 +40,13 @@ parse_file() {
             TIMESTAMP) P_TIMESTAMP="${line#*=}" ;;
         esac
     done < "$file" || true
+    [ -z "$P_AGENT" ] && P_AGENT="claude"
     [ -z "$P_SESSION" ] && return 1
     return 0
 }
 
 # Arrays to hold entry data (indexed by internal entry number)
-declare -a E_SESSION=() E_WINDOW=() E_WNAME=() E_MSG=() E_TS=() E_CAT=()
+declare -a E_AGENT=() E_SESSION=() E_WINDOW=() E_WNAME=() E_MSG=() E_TS=() E_CAT=()
 INDEX=0  # Total number of entries
 
 # Display order: maps visual position (1-based) to internal index
@@ -94,10 +94,12 @@ build_display_order() {
             # Apply search filter
             if [ -n "$query_lower" ]; then
                 local match=0
-                local sess_lower wname_lower msg_lower
+                local agent_lower sess_lower wname_lower msg_lower
+                agent_lower="$(to_lower "${E_AGENT[$i]}")"
                 sess_lower="$(to_lower "${E_SESSION[$i]}")"
                 wname_lower="$(to_lower "${E_WNAME[$i]}")"
                 msg_lower="$(to_lower "${E_MSG[$i]}")"
+                [[ "$agent_lower" == *"$query_lower"* ]] && match=1
                 [[ "$sess_lower" == *"$query_lower"* ]] && match=1
                 [[ "$wname_lower" == *"$query_lower"* ]] && match=1
                 [[ "$msg_lower" == *"$query_lower"* ]] && match=1
@@ -147,7 +149,7 @@ cleanup_stale() {
 load_entries() {
     # Prune stale sessions before loading
     cleanup_stale
-    E_SESSION=() E_WINDOW=() E_WNAME=() E_MSG=() E_TS=() E_CAT=()
+    E_AGENT=() E_SESSION=() E_WINDOW=() E_WNAME=() E_MSG=() E_TS=() E_CAT=()
     INDEX=0
     MAX_SESSWIN=0
     MAX_WNAME=0
@@ -158,6 +160,7 @@ load_entries() {
         [ -f "$f" ] || continue
         if parse_file "$f"; then
             INDEX=$(( INDEX + 1 ))
+            E_AGENT[$INDEX]="$P_AGENT"
             E_SESSION[$INDEX]="$P_SESSION"
             E_WINDOW[$INDEX]="$P_WINDOW"
             E_WNAME[$INDEX]="$P_WINDOW_NAME"
@@ -175,6 +178,7 @@ load_entries() {
         [ -f "$f" ] || continue
         if parse_file "$f"; then
             INDEX=$(( INDEX + 1 ))
+            E_AGENT[$INDEX]="$P_AGENT"
             E_SESSION[$INDEX]="$P_SESSION"
             E_WINDOW[$INDEX]="$P_WINDOW"
             E_WNAME[$INDEX]="$P_WINDOW_NAME"
@@ -189,7 +193,7 @@ load_entries() {
 
     # Calculate max column widths
     for i in $(seq 1 "$INDEX"); do
-        local sw="${E_SESSION[$i]}:${E_WINDOW[$i]}"
+        local sw="$(agent_label "${E_AGENT[$i]}") ${E_SESSION[$i]}:${E_WINDOW[$i]}"
         [ "${#sw}" -gt "$MAX_SESSWIN" ] && MAX_SESSWIN="${#sw}"
         [ "${#E_WNAME[$i]}" -gt "$MAX_WNAME" ] && MAX_WNAME="${#E_WNAME[$i]}"
     done
@@ -221,7 +225,7 @@ render_entry() {
     clr="$(color_for "$cat")"
     icon="$(icon_for "$cat")"
     key="$(pos_to_key "$display_pos")"
-    sesswin="${E_SESSION[$i]}:${E_WINDOW[$i]}"
+    sesswin="$(agent_label "${E_AGENT[$i]}") ${E_SESSION[$i]}:${E_WINDOW[$i]}"
     wname="${E_WNAME[$i]}"
     msg="${E_MSG[$i]}"
     rel="$(relative_time "${E_TS[$i]}")"
@@ -330,7 +334,7 @@ render() {
     fi
 
     # Header (line 1)
-    printf '  \033[1mClaude Code Sessions\033[0m\n'
+    printf '  \033[1mAgent Sessions\033[0m\n'
 
     if [ "$DISPLAY_COUNT" -eq 0 ]; then
         if [ -n "$SEARCH_QUERY" ]; then
@@ -453,7 +457,7 @@ ensure_cursor_visible() {
     [ "$SCROLL_OFFSET" -lt 1 ] && SCROLL_OFFSET=1
 }
 
-# Auto-scan for untracked Claude Code sessions
+# Auto-scan for visible Claude panes that started before hooks loaded.
 "${SCRIPT_DIR}/scan.sh" >/dev/null 2>&1 || true
 
 load_entries
@@ -592,8 +596,8 @@ while true; do
             tmux refresh-client -S 2>/dev/null || true
             render
             ;;
-        m|M)  # Open cc-monitor session
-            tmux run-shell "${SCRIPT_DIR}/cc-monitor.sh" 2>/dev/null || true
+        m|M)  # Open agent-monitor session
+            tmux run-shell "${SCRIPT_DIR}/agent-monitor.sh" 2>/dev/null || true
             exit 0
             ;;
         i)  # Detail view

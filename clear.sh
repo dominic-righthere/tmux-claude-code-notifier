@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
-# Claude Code Notifier — auto-clear on window switch
-# Called by tmux after-select-window hook
-# Args: $1 = session name, $2 = window index
+# Agent Notifier auto-clear on tmux window switch.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/lib.sh"
-NOTIF_DIR="${HOME}/.local/share/claude-notifier/notifications"
 
+NOTIF_DIR="${DATA_DIR}/notifications"
 [ -d "$NOTIF_DIR" ] || exit 0
 
 SESSION="${1:-}"
 WINDOW="${2:-}"
-[ -z "$SESSION" ] && exit 0
-[ -z "$WINDOW" ] && exit 0
+[ -n "$SESSION" ] || exit 0
+[ -n "$WINDOW" ] || exit 0
 
-SAFE_SESSION="$(sanitize_key "$SESSION")"
-KEY="${SAFE_SESSION}_${WINDOW}"
-
-rm -f "${NOTIF_DIR}/${KEY}"
+for f in "$NOTIF_DIR"/*; do
+    [ -f "$f" ] || continue
+    _sess="$(read_state_field "$f" SESSION 2>/dev/null || true)"
+    _win="$(read_state_field "$f" WINDOW 2>/dev/null || true)"
+    [ "$_sess" = "$SESSION" ] && [ "$_win" = "$WINDOW" ] && rm -f "$f"
+done
 
 exit 0

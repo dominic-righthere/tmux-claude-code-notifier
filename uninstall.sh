@@ -1,67 +1,65 @@
 #!/usr/bin/env bash
-# Claude Code Notifier — uninstaller
-# Removes hooks from settings.json, config block from tmux.conf, and data directory
+# Agent Notifier uninstaller.
 set -euo pipefail
 
-SETTINGS_FILE="${HOME}/.claude/settings.json"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CLAUDE_SETTINGS="${HOME}/.claude/settings.json"
+CODEX_HOOKS="${HOME}/.codex/hooks.json"
+PI_EXTENSION_FILE="${HOME}/.pi/agent/extensions/agent-notifier.ts"
 TMUX_CONF="${HOME}/.tmux.conf"
-DATA_DIR="${HOME}/.local/share/claude-notifier"
+DATA_DIR="${AGENT_NOTIFIER_DATA_DIR:-${HOME}/.local/share/agent-notifier}"
 
-printf 'Claude Code Notifier — Uninstall\n\n'
+printf 'Agent Notifier - Uninstall\n\n'
 
-# 1. Remove hooks from ~/.claude/settings.json
-if [ -f "$SETTINGS_FILE" ]; then
-    if ! command -v jq &>/dev/null; then
-        printf '  Warning: jq not found, skipping settings.json cleanup.\n'
-        printf '  Manually remove hook entries from %s\n' "$SETTINGS_FILE"
-    else
-        printf '  Removing hooks from settings.json...\n'
-        jq '
-          del(.hooks.SessionStart) |
-          del(.hooks.SessionEnd) |
-          del(.hooks.UserPromptSubmit) |
-          del(.hooks.PreToolUse) |
-          del(.hooks.Stop) |
-          del(.hooks.Notification) |
-          del(.hooks.PermissionRequest) |
-          if .hooks == {} then del(.hooks) else . end
-        ' "$SETTINGS_FILE" > "${SETTINGS_FILE}.tmp" && mv "${SETTINGS_FILE}.tmp" "$SETTINGS_FILE"
+remove_hooks_from_file() {
+    local file="$1"
+    [ -f "$file" ] || return 0
+    if ! command -v jq >/dev/null 2>&1; then
+        printf '  Warning: jq not found; manually remove Agent Notifier hooks from %s\n' "$file"
+        return 0
     fi
-else
-    printf '  No settings.json found, skipping.\n'
+    jq --arg dir "$SCRIPT_DIR" '
+      .hooks = ((.hooks // {}) | with_entries(
+        .value = [
+          .value[]? |
+          .hooks = ([.hooks[]? | select((.command // "") | startswith($dir) | not)]) |
+          select((.hooks | length) > 0)
+        ] |
+        select((.value | length) > 0)
+      )) |
+      if .hooks == {} then del(.hooks) else . end
+    ' "$file" > "${file}.tmp" && mv "${file}.tmp" "$file"
+}
+
+printf '  Removing Claude hooks...\n'
+remove_hooks_from_file "$CLAUDE_SETTINGS"
+
+printf '  Removing Codex hooks...\n'
+remove_hooks_from_file "$CODEX_HOOKS"
+
+if [ -f "$PI_EXTENSION_FILE" ] && grep -q "$SCRIPT_DIR" "$PI_EXTENSION_FILE" 2>/dev/null; then
+    printf '  Removing Pi extension...\n'
+    rm -f "$PI_EXTENSION_FILE"
 fi
 
-# 2. Remove config block from ~/.tmux.conf
-if [ -f "$TMUX_CONF" ] && grep -q '# claude-notifier-begin' "$TMUX_CONF" 2>/dev/null; then
-    printf '  Removing tmux config block...\n'
-    # Pipe through sed (not -i) to support symlinked tmux.conf
-    sed '/# claude-notifier-begin/,/# claude-notifier-end/d' "$TMUX_CONF" > "${TMUX_CONF}.tmp"
-    # Collapse consecutive blank lines, write back through symlink
-    cat -s "${TMUX_CONF}.tmp" > "$TMUX_CONF"
-    rm -f "${TMUX_CONF}.tmp"
-else
-    printf '  No tmux config block found, skipping.\n'
-fi
-
-# 3. Stop Telegram bot daemon if running
-PID_FILE="${DATA_DIR}/telegram.pid"
-if [ -f "$PID_FILE" ]; then
-    pid="$(<"$PID_FILE")"
-    if kill -0 "$pid" 2>/dev/null; then
-        printf '  Stopping Telegram bot daemon (PID %s)...\n' "$pid"
-        kill "$pid" 2>/dev/null || true
-        sleep 1
-        kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+if [ -f "$TMUX_CONF" ]; then
+    if grep -q '# agent-notifier-begin' "$TMUX_CONF" 2>/dev/null; then
+        printf '  Removing tmux config block...\n'
+        sed '/# agent-notifier-begin/,/# agent-notifier-end/d' "$TMUX_CONF" > "${TMUX_CONF}.tmp"
+        cat -s "${TMUX_CONF}.tmp" > "$TMUX_CONF"
+        rm -f "${TMUX_CONF}.tmp"
+    fi
+    if grep -q '# claude-notifier-begin' "$TMUX_CONF" 2>/dev/null; then
+        printf '  Removing legacy tmux config block...\n'
+        sed '/# claude-notifier-begin/,/# claude-notifier-end/d' "$TMUX_CONF" > "${TMUX_CONF}.tmp"
+        cat -s "${TMUX_CONF}.tmp" > "$TMUX_CONF"
+        rm -f "${TMUX_CONF}.tmp"
     fi
 fi
 
-# 4. Remove data directory
 if [ -d "$DATA_DIR" ]; then
     printf '  Removing data directory...\n'
     rm -rf "$DATA_DIR"
-else
-    printf '  No data directory found, skipping.\n'
 fi
 
-printf '\n  Uninstall complete!\n\n'
-printf '  Run: tmux source ~/.tmux.conf\n\n'
+printf '\n  Uninstall complete. Run: tmux source ~/.tmux.conf\n\n'

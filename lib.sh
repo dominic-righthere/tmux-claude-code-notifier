@@ -1,41 +1,59 @@
 #!/usr/bin/env bash
-# Claude Code Notifier — shared library
-# Source this from other scripts: source "${SCRIPT_DIR}/lib.sh"
+# Agent Notifier shared helpers.
 
-# ─── Event logging (SQLite) ──────────────────────────────────────────────────
+: "${AGENT_NOTIFIER_DATA_DIR:=${HOME}/.local/share/agent-notifier}"
+DATA_DIR="$AGENT_NOTIFIER_DATA_DIR"
+LEGACY_DATA_DIR="${HOME}/.local/share/claude-notifier"
+EVENTS_DB="${DATA_DIR}/events.db"
 
-EVENTS_DB="${HOME}/.local/share/claude-notifier/events.db"
+ensure_data_dirs() {
+    mkdir -p "${DATA_DIR}/active" "${DATA_DIR}/notifications"
+    chmod 700 "$DATA_DIR" 2>/dev/null || true
+}
+
+migrate_legacy_state() {
+    [ -d "$LEGACY_DATA_DIR" ] || return 0
+    [ "$DATA_DIR" != "$LEGACY_DATA_DIR" ] || return 0
+    if [ -d "$DATA_DIR" ] && [ -n "$(find "$DATA_DIR" -mindepth 1 -maxdepth 1 2>/dev/null)" ]; then
+        return 0
+    fi
+
+    mkdir -p "$DATA_DIR"
+    for item in active notifications events.db installed_version status2.disabled; do
+        [ -e "${LEGACY_DATA_DIR}/${item}" ] || continue
+        cp -pR "${LEGACY_DATA_DIR}/${item}" "${DATA_DIR}/${item}" 2>/dev/null || true
+    done
+    mkdir -p "${DATA_DIR}/active" "${DATA_DIR}/notifications"
+}
 
 init_events_db() {
+    ensure_data_dirs
     [ -f "$EVENTS_DB" ] && return 0
-    mkdir -p "$(dirname "$EVENTS_DB")"
-    chmod 700 "$(dirname "$EVENTS_DB")"
-    sqlite3 "$EVENTS_DB" <<'SQL' >/dev/null
+    command -v sqlite3 >/dev/null 2>&1 || return 0
+    sqlite3 "$EVENTS_DB" <<'SQL' >/dev/null 2>&1 || true
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now','localtime')),
     src TEXT NOT NULL,
     event TEXT NOT NULL,
+    agent TEXT,
     session TEXT,
     window TEXT,
     type TEXT,
     tool TEXT,
-    action TEXT,
-    msg_id TEXT,
     message TEXT,
     text TEXT,
     extra TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
-CREATE INDEX IF NOT EXISTS idx_events_session ON events(session, window);
+CREATE INDEX IF NOT EXISTS idx_events_session ON events(agent, session, window);
 PRAGMA journal_mode=WAL;
 SQL
 }
 
-# log_event key val key val ...
-# Builds INSERT from key-value pairs. Silently no-ops if DB missing or sqlite3 fails.
 log_event() {
     [ -f "$EVENTS_DB" ] || return 0
+    command -v sqlite3 >/dev/null 2>&1 || return 0
     local cols="ts" vals="strftime('%Y-%m-%dT%H:%M:%S','now','localtime')"
     local _q="'"
     while [ $# -ge 2 ]; do
@@ -48,26 +66,24 @@ log_event() {
     sqlite3 "$EVENTS_DB" "INSERT INTO events(${cols}) VALUES(${vals});" 2>/dev/null || true
 }
 
-# ─── Utilities ────────────────────────────────────────────────────────────────
-
-# Sanitize a tmux session name for use as a filename
-# Usage: sanitize_key "my session/name"
 sanitize_key() {
-    printf '%s' "$1" | tr '/ ' '__'
+    printf '%s' "$1" | tr '/ :' '___'
 }
 
-# Write a state file (active/ or notifications/ entry)
-# Usage: write_state_file <dir> <key> <session> <window> <window_name> <type> <message> <timestamp>
+agent_key() {
+    local agent="$1" session="$2" window="$3"
+    printf '%s_%s_%s' "$(sanitize_key "$agent")" "$(sanitize_key "$session")" "$(sanitize_key "$window")"
+}
+
 write_state_file() {
-    local dir="$1" key="$2" session="$3" window="$4" window_name="$5" type="$6" message="$7" timestamp="$8"
-    printf 'SESSION=%s\nWINDOW=%s\nWINDOW_NAME=%s\nMESSAGE=%s\nTYPE=%s\nTIMESTAMP=%s\n' \
-        "$session" "$window" "$window_name" "$message" "$type" "$timestamp" \
+    local dir="$1" key="$2" agent="$3" session="$4" window="$5" window_name="$6" type="$7" message="$8" timestamp="$9"
+    local provider_session_id="${10:-}" cwd="${11:-}"
+    mkdir -p "$dir"
+    printf 'AGENT=%s\nSESSION=%s\nWINDOW=%s\nWINDOW_NAME=%s\nMESSAGE=%s\nTYPE=%s\nTIMESTAMP=%s\nPROVIDER_SESSION_ID=%s\nCWD=%s\n' \
+        "$agent" "$session" "$window" "$window_name" "$message" "$type" "$timestamp" "$provider_session_id" "$cwd" \
         > "${dir}/${key}"
 }
 
-# Read a specific field from a state file
-# Usage: read_state_field <file> <field_name>
-# Returns the value via stdout, exit 1 if not found
 read_state_field() {
     local file="$1" field="$2"
     [ -f "$file" ] || return 1
@@ -79,31 +95,6 @@ read_state_field() {
     return 1
 }
 
-# HTML-escape &<> for Telegram messages
-# Usage: html_escape "string with <html>"
-html_escape() {
-    local s="$1"
-    s="${s//&/&amp;}"
-    s="${s//</&lt;}"
-    s="${s//>/&gt;}"
-    printf '%s' "$s"
-}
-
-# Extract last N non-blank meaningful lines from text
-# Usage: extract_preview "text" [count]
-extract_preview() {
-    local text="$1" count="${2:-3}"
-    printf '%s' "$text" | grep -v '^[[:space:]]*$' | tail -"$count"
-}
-
-# Strip ANSI escape codes from text
-# Usage: strip_ansi "text with \033[31mcolor\033[0m"
-strip_ansi() {
-    printf '%s' "$1" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g'
-}
-
-# Icon for notification category
-# Usage: icon_for "working"
 icon_for() {
     case "$1" in
         working)  printf '⟳' ;;
@@ -113,151 +104,19 @@ icon_for() {
     esac
 }
 
-# Strip leading/trailing blank lines (macOS-compatible)
-# Usage: echo "text" | trim_blank_lines
-trim_blank_lines() {
-    local line lines=() started=0
-    while IFS= read -r line; do
-        if [ "$started" -eq 0 ]; then
-            [[ "$line" =~ ^[[:space:]]*$ ]] && continue
-            started=1
-        fi
-        lines+=("$line")
-    done
-    # Remove trailing blank lines
-    local i=$(( ${#lines[@]} - 1 ))
-    while [ "$i" -ge 0 ] && [[ "${lines[$i]}" =~ ^[[:space:]]*$ ]]; do
-        unset 'lines[$i]'
-        i=$(( i - 1 ))
-    done
-    printf '%s\n' "${lines[@]}"
+agent_label() {
+    case "$1" in
+        claude) printf 'Claude' ;;
+        codex)  printf 'Codex' ;;
+        pi)     printf 'Pi' ;;
+        *)      printf '%s' "$1" ;;
+    esac
 }
 
-# Reflow captured terminal output for Telegram readability.
-# Claude Code hard-wraps output at the pane width. This rejoins wrapped prose
-# while preserving structural lines (markers, diffs, lists, prompts).
-# Usage: reflow_for_telegram [pane_width]
-reflow_for_telegram() {
-    local width="${1:-120}"
-    awk -v thr="$((width - 5))" '
-    function structural(s) {
-        if (s ~ /^[[:space:]]*(⏺|⎿|❯|✻)/) return 1
-        if (s ~ /…/) return 1
-        if (s ~ /^[[:space:]]+[0-9]+[[:space:]]+[-+|]/) return 1
-        if (s ~ /^[[:space:]]+[-*][ ]/) return 1
-        if (s ~ /^[[:space:]]+[0-9]+\.[ ]/) return 1
-        if (s ~ /^[[:space:]]*[$>][ ]/) return 1
-        if (s ~ /^(===|---)/) return 1
-        return 0
-    }
-    {
-        rlen = length($0)
-        if ($0 ~ /^[[:space:]]*$/) {
-            if (buf != "") print buf; buf = ""; print; pl = 0
-        } else if (structural($0)) {
-            if (buf != "") print buf; buf = $0; pl = rlen
-        } else if (pl >= thr && buf != "") {
-            sub(/^[[:space:]]+/, ""); buf = buf " " $0; pl = rlen
-        } else {
-            if (buf != "") print buf; buf = $0; pl = rlen
-        }
-    }
-    END { if (buf != "") print buf }
-    '
-}
-
-# Extract activity log from terminal output.
-# Finds ⎿ marker lines in the current work block (after last ❯ line),
-# deduplicates, and formats as bullet list.
-# Usage: extract_activity_log "text" [max_items]
-extract_activity_log() {
-    local text="$1" max="${2:-20}"
-    # Get current work block: everything after the last ❯ line (user input boundary)
-    local work_block
-    work_block="$(printf '%s' "$text" | awk '/❯ / { buf="" } { buf = buf "\n" $0 } END { print buf }')"
-    [ -z "$work_block" ] && work_block="$text"
-
-    # Extract ⎿ lines, deduplicate, format as bullets
-    printf '%s' "$work_block" \
-        | grep -E '^\s*⎿' \
-        | sed 's/^[[:space:]]*⎿[[:space:]]*//' \
-        | sed 's/^[[:space:]]*//' \
-        | grep -v '^[[:space:]]*$' \
-        | awk '!seen[$0]++' \
-        | head -"$max" \
-        | sed 's/^/• /'
-}
-
-# Extract Claude's prompt/speech text.
-# Finds text between the last ⏺ marker and the ❯/numbered options at the bottom.
-# Usage: extract_prompt_text "text" [max_chars]
-extract_prompt_text() {
-    local text="$1" max_chars="${2:-1500}"
-    # Find last ⏺ block, take lines until ❯ or numbered option
-    local extracted
-    extracted="$(printf '%s' "$text" \
-        | awk '
-        /⏺/ { buf = ""; capturing = 1; next }
-        capturing && /^[[:space:]]*(❯|[0-9]+\.)/ { capturing = 0; next }
-        capturing { buf = buf "\n" $0 }
-        END { print buf }
-        ' \
-        | sed '/^[[:space:]]*$/d' \
-        | sed 's/^[[:space:]]*//')"
-    # Truncate at last newline before budget
-    if [ "${#extracted}" -gt "$max_chars" ]; then
-        extracted="${extracted:0:$max_chars}"
-        # Find last newline for clean line boundary
-        local last_nl="${extracted%$'\n'*}"
-        if [ "$last_nl" != "$extracted" ] && [ -n "$last_nl" ]; then
-            extracted="$last_nl"
-        fi
-        extracted="${extracted}..."
+short_message() {
+    local msg="$1" max="${2:-80}"
+    if [ "${#msg}" -gt "$max" ]; then
+        msg="${msg:0:$((max - 3))}..."
     fi
-    printf '%s' "$extracted"
-}
-
-# Convert markdown pipe-delimited tables to bullet format for mobile.
-# Pipe filter: detects |col|col| rows, skips |---| separators,
-# outputs "- col1: col2" bullets. Non-table lines pass through unchanged.
-# Usage: echo "text" | convert_tables_to_bullets
-convert_tables_to_bullets() {
-    awk '
-    BEGIN { header_count = 0; split("", headers) }
-    /^\|[-:[:space:]]+\|/ { next }
-    /^\|.*\|$/ {
-        # Strip leading/trailing |, split by |
-        line = $0
-        gsub(/^[[:space:]]*\|/, "", line)
-        gsub(/\|[[:space:]]*$/, "", line)
-        n = split(line, cols, "|")
-        for (i = 1; i <= n; i++) {
-            gsub(/^[[:space:]]+|[[:space:]]+$/, "", cols[i])
-        }
-        if (header_count == 0) {
-            header_count = n
-            for (i = 1; i <= n; i++) headers[i] = cols[i]
-        } else {
-            out = "- "
-            for (i = 1; i <= n; i++) {
-                if (i > 1) out = out ", "
-                if (i <= header_count && headers[i] != "") {
-                    out = out headers[i] ": " cols[i]
-                } else {
-                    out = out cols[i]
-                }
-            }
-            print out
-        }
-        next
-    }
-    { header_count = 0; print }
-    '
-}
-
-# Wrap long lines for mobile-friendly display.
-# Usage: echo "text" | wrap_long_lines [width]
-wrap_long_lines() {
-    local width="${1:-50}"
-    fold -s -w "$width"
+    printf '%s' "$msg"
 }

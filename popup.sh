@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
-# Claude Code Notifier — popup wrapper
-# Calculates dynamic height based on entry count and opens tmux popup
+# Agent Notifier popup wrapper.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-DATA_DIR="${HOME}/.local/share/claude-notifier"
+source "${SCRIPT_DIR}/lib.sh"
 
-# Discover untracked sessions before opening
-"${SCRIPT_DIR}/scan.sh" >/dev/null 2>&1 || true
-
-tmux display-popup -E -w 80% -h 90% "${SCRIPT_DIR}/dashboard.sh"
+tmux display-popup -E -w 82 -h 28 -T "Agent Notifications" "${SCRIPT_DIR}/dashboard.sh" 2>/dev/null || "${SCRIPT_DIR}/dashboard.sh"

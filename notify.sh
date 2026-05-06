@@ -1,137 +1,111 @@
 #!/usr/bin/env bash
-# Claude Code hook handler — tracks working/finished/waiting state in tmux
-# Reads hook JSON from stdin, manages files in ~/.local/share/claude-notifier/
+# Agent Notifier hook handler. Reads hook JSON on stdin and updates tmux-local state.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/lib.sh"
-DATA_DIR="${HOME}/.local/share/claude-notifier"
+
+ensure_data_dirs
 ACTIVE_DIR="${DATA_DIR}/active"
 NOTIF_DIR="${DATA_DIR}/notifications"
-MSG_ID_DIR="${DATA_DIR}/telegram_msg_ids"
-mkdir -p "$ACTIVE_DIR" "$NOTIF_DIR"
-chmod 700 "$DATA_DIR"
 
-# Read JSON from stdin
 INPUT="$(cat)"
+[ -n "$INPUT" ] || exit 0
+command -v jq >/dev/null 2>&1 || exit 0
 
-# Parse all hook JSON fields with jq
-EVENT="$(printf '%s' "$INPUT" | jq -r '.hook_event_name // empty')"
-MSG="$(printf '%s' "$INPUT" | jq -r '.message // empty')"
-TOOL_NAME="$(printf '%s' "$INPUT" | jq -r '.tool_name // empty')"
-TOOL_INPUT="$(printf '%s' "$INPUT" | jq -r '(.tool_input | if type == "object" then tostring else . // "" end)')"
-SESSION_ID="$(printf '%s' "$INPUT" | jq -r '.session_id // empty')"
-CWD="$(printf '%s' "$INPUT" | jq -r '.cwd // empty')"
-PERMISSION_MODE="$(printf '%s' "$INPUT" | jq -r '.permission_mode // empty')"
-PROMPT="$(printf '%s' "$INPUT" | jq -r '.prompt // empty')"
+EVENT="$(printf '%s' "$INPUT" | jq -r '.hook_event_name // .event // .type // empty' 2>/dev/null)" || exit 0
+[ -n "$EVENT" ] || exit 0
 
-# Exit if we couldn't parse the event
-[ -z "$EVENT" ] && exit 0
+AGENT="$(printf '%s' "$INPUT" | jq -r '.agent // .provider // empty' 2>/dev/null)"
+AGENT="${AGENT:-${AGENT_NOTIFIER_AGENT:-claude}}"
+AGENT="$(printf '%s' "$AGENT" | tr '[:upper:]' '[:lower:]')"
 
-# Get tmux context — if not in tmux, exit silently
-if [ -z "${TMUX:-}" ]; then
-    exit 0
-fi
+MSG="$(printf '%s' "$INPUT" | jq -r '.message // .text // empty' 2>/dev/null)"
+TOOL_NAME="$(printf '%s' "$INPUT" | jq -r '.tool_name // .toolName // .tool // .tool_call.name // empty' 2>/dev/null)"
+TOOL_INPUT="$(printf '%s' "$INPUT" | jq -r '(.tool_input // .toolInput // .tool_call.arguments // empty) | if type == "object" or type == "array" then tostring else . end' 2>/dev/null)"
+SESSION_ID="$(printf '%s' "$INPUT" | jq -r '.session_id // .sessionId // .conversation_id // empty' 2>/dev/null)"
+CWD="$(printf '%s' "$INPUT" | jq -r '.cwd // .working_directory // .worktree // empty' 2>/dev/null)"
+PROMPT="$(printf '%s' "$INPUT" | jq -r '.prompt // .user_prompt // empty' 2>/dev/null)"
+PERMISSION_MODE="$(printf '%s' "$INPUT" | jq -r '.permission_mode // .permissionMode // empty' 2>/dev/null)"
 
-# Use TMUX_PANE to identify Claude's pane, so we always resolve the correct
-# session/window even when the user is viewing a different window.
+[ -n "${TMUX:-}" ] || exit 0
+
 PANE_TARGET="${TMUX_PANE:-%0}"
 _tmux_info="$(tmux display-message -t "$PANE_TARGET" -p '#{session_name}|#{window_index}|#{window_name}' 2>/dev/null)" || exit 0
 IFS='|' read -r SESSION WINDOW WINDOW_NAME <<< "$_tmux_info"
+[ -n "${SESSION:-}" ] || exit 0
+[ -n "${WINDOW:-}" ] || exit 0
 
-[ -z "$SESSION" ] && exit 0
-[ -z "$WINDOW" ] && exit 0
-
-SAFE_SESSION="$(sanitize_key "$SESSION")"
-KEY="${SAFE_SESSION}_${WINDOW}"
-
+KEY="$(agent_key "$AGENT" "$SESSION" "$WINDOW")"
 NOW="$(date +%s)"
 
 write_file() {
     local dir="$1" type="$2" message="$3"
-    write_state_file "$dir" "$KEY" "$SESSION" "$WINDOW" "$WINDOW_NAME" "$type" "$message" "$NOW"
+    write_state_file "$dir" "$KEY" "$AGENT" "$SESSION" "$WINDOW" "$WINDOW_NAME" "$type" "$message" "$NOW" "$SESSION_ID" "$CWD"
 }
 
+clear_notification() {
+    rm -f "${NOTIF_DIR}/${KEY}"
+}
 
-# Refresh cc-monitor session if it's currently open and not disabled
-# Toggle: touch ~/.local/share/claude-notifier/cc-monitor.disabled to disable
 refresh_monitor() {
-    [ -f "${DATA_DIR}/cc-monitor.disabled" ] && return 0
-    if tmux has-session -t cc-monitor 2>/dev/null; then
-        "${SCRIPT_DIR}/cc-monitor.sh" refresh &
+    [ -f "${DATA_DIR}/agent-monitor.disabled" ] && return 0
+    if tmux has-session -t agent-monitor 2>/dev/null; then
+        "${SCRIPT_DIR}/agent-monitor.sh" refresh &
     fi
 }
 
+notify_locally() {
+    # Hook stdout can be interpreted by the host agent as control output.
+    # Keep this handler silent and let tmux status/dashboard surface state.
+    :
+}
+
 case "$EVENT" in
-    SessionStart)
-        # New Claude Code session — register immediately
-        write_file "$ACTIVE_DIR" "working" "Starting..."
-        log_event src hook event SessionStart session "$SESSION" window "$WINDOW" extra "sid=$SESSION_ID mode=$PERMISSION_MODE cwd=$CWD"
+    SessionStart|session_start)
+        write_file "$ACTIVE_DIR" "idle" "Idle"
+        log_event src hook event "$EVENT" agent "$AGENT" session "$SESSION" window "$WINDOW" extra "sid=$SESSION_ID cwd=$CWD"
         refresh_monitor
         ;;
-    SessionEnd)
-        # Session closed — clean up all state
-        rm -f "${ACTIVE_DIR}/${KEY}" "${NOTIF_DIR}/${KEY}" "${MSG_ID_DIR}/${KEY}"
-        log_event src hook event SessionEnd session "$SESSION" window "$WINDOW" extra "sid=$SESSION_ID"
+    SessionEnd|session_shutdown)
+        rm -f "${ACTIVE_DIR}/${KEY}" "${NOTIF_DIR}/${KEY}"
+        log_event src hook event "$EVENT" agent "$AGENT" session "$SESSION" window "$WINDOW" extra "sid=$SESSION_ID"
         refresh_monitor
         ;;
-    UserPromptSubmit)
-        # Claude is working — mark active, clear notification + msg_id
+    UserPromptSubmit|user_prompt_submit|before_agent_start|agent_start|turn_start)
         write_file "$ACTIVE_DIR" "working" "Working..."
-        rm -f "${NOTIF_DIR}/${KEY}" "${MSG_ID_DIR}/${KEY}"
-        # Dispatch prompt to Telegram so user sees what they asked
-        if [ -n "$PROMPT" ]; then
-            "${SCRIPT_DIR}/dispatch.sh" "prompt" "$SESSION" "$WINDOW" "$PROMPT" &
-        fi
-        log_event src hook event UserPromptSubmit session "$SESSION" window "$WINDOW" text "$PROMPT" extra "sid=$SESSION_ID cwd=$CWD"
+        clear_notification
+        log_event src hook event "$EVENT" agent "$AGENT" session "$SESSION" window "$WINDOW" text "$PROMPT" extra "sid=$SESSION_ID cwd=$CWD"
         ;;
-    PreToolUse)
-        # Live tool activity — show what Claude is doing instead of "Working..."
+    PreToolUse|pre_tool_use|tool_execution_start|tool_call)
         tool_label="${TOOL_NAME:-tool}"
-        write_file "$ACTIVE_DIR" "working" "${tool_label}..."
-        rm -f "${NOTIF_DIR}/${KEY}"    # clear stale waiting (permission was resolved)
-        log_event src hook event PreToolUse session "$SESSION" window "$WINDOW" tool "$TOOL_NAME" text "$TOOL_INPUT" extra "sid=$SESSION_ID cwd=$CWD"
+        write_file "$ACTIVE_DIR" "working" "$(short_message "${tool_label}..." 80)"
+        clear_notification
+        log_event src hook event "$EVENT" agent "$AGENT" session "$SESSION" window "$WINDOW" tool "$TOOL_NAME" text "$TOOL_INPUT" extra "sid=$SESSION_ID cwd=$CWD"
         ;;
-    Stop)
-        # Claude finished — mark as idle (keep in active dir for visibility)
+    PostToolUse|post_tool_use|tool_execution_end|tool_execution_update|turn_end|message_end)
+        write_file "$ACTIVE_DIR" "working" "Working..."
+        log_event src hook event "$EVENT" agent "$AGENT" session "$SESSION" window "$WINDOW" tool "$TOOL_NAME" extra "sid=$SESSION_ID cwd=$CWD"
+        ;;
+    Stop|stop|agent_end)
         write_file "$ACTIVE_DIR" "idle" "Idle"
         write_file "$NOTIF_DIR" "finished" "Finished"
-        printf '\a'
-        "${SCRIPT_DIR}/dispatch.sh" "finished" "$SESSION" "$WINDOW" "Finished" &
-        log_event src hook event Stop session "$SESSION" window "$WINDOW" type finished message "$MSG" extra "sid=$SESSION_ID cwd=$CWD"
+        notify_locally
+        log_event src hook event "$EVENT" agent "$AGENT" session "$SESSION" window "$WINDOW" type finished message "$MSG" extra "sid=$SESSION_ID cwd=$CWD"
+        refresh_monitor
         ;;
-    Notification)
-        [ -z "$MSG" ] && MSG="Notification"
-        # Truncate long messages
-        if [ "${#MSG}" -gt 40 ]; then
-            MSG="${MSG:0:37}..."
+    Notification|notification|PermissionRequest|permission_request|waiting)
+        if [ "$EVENT" = "PermissionRequest" ] || [ "$EVENT" = "permission_request" ] || [ "$EVENT" = "waiting" ]; then
+            MSG="Waiting"
+            [ -n "$TOOL_NAME" ] && MSG="Waiting: ${TOOL_NAME}"
         fi
-        # Don't overwrite a waiting notification (PermissionRequest already has buttons)
-        EXISTING_TYPE="$(read_state_field "${NOTIF_DIR}/${KEY}" "TYPE" 2>/dev/null)" || EXISTING_TYPE=""
-        if [ "$EXISTING_TYPE" = "waiting" ]; then
-            printf '\a'
-            log_event src hook event Notification session "$SESSION" window "$WINDOW" message "skipped (waiting exists)"
-        else
-            write_file "$NOTIF_DIR" "waiting" "$MSG"
-            printf '\a'
-            "${SCRIPT_DIR}/dispatch.sh" "waiting" "$SESSION" "$WINDOW" "$MSG" &
-            log_event src hook event Notification session "$SESSION" window "$WINDOW" message "$MSG"
-        fi
-        ;;
-    PermissionRequest)
-        # Permission needed — record as waiting with tool name
-        local_msg="Waiting"
-        if [ -n "$TOOL_NAME" ]; then
-            local_msg="Waiting: ${TOOL_NAME}"
-        fi
-        write_file "$NOTIF_DIR" "waiting" "$local_msg"
-        printf '\a'
-        "${SCRIPT_DIR}/dispatch.sh" "waiting" "$SESSION" "$WINDOW" "$local_msg" "$TOOL_NAME" "$PERMISSION_MODE" &
-        log_event src hook event PermissionRequest session "$SESSION" window "$WINDOW" tool "$TOOL_NAME" text "$TOOL_INPUT" extra "sid=$SESSION_ID cwd=$CWD mode=$PERMISSION_MODE"
+        [ -n "$MSG" ] || MSG="Notification"
+        write_file "$NOTIF_DIR" "waiting" "$(short_message "$MSG" 80)"
+        notify_locally
+        log_event src hook event "$EVENT" agent "$AGENT" session "$SESSION" window "$WINDOW" tool "$TOOL_NAME" message "$MSG" extra "sid=$SESSION_ID cwd=$CWD mode=$PERMISSION_MODE"
+        refresh_monitor
         ;;
 esac
 
-# Force immediate tmux status bar refresh
 tmux refresh-client -S 2>/dev/null || true
-
 exit 0
